@@ -2,7 +2,8 @@
   "name": "ninja-bot",
   "version": "1.0.0",
   "description": "Ninja Bot - Telegram Auto-Reply Native Windows App",
-  "main": "main.js",
+  "main": "main.mjs",
+  "type": "module",
   "scripts": {
     "start": "electron .",
     "build": "electron-builder --win --x64",

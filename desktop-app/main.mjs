@@ -1,10 +1,27 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
-const path = require('path');
-const fs = require('fs');
-const { TelegramClient } = require('telegram');
-const { StringSession } = require('telegram/sessions');
-const { NewMessage } = require('telegram/events');
-const Mistral = require('@mistralai/mistralai').Mistral;
+import { app, BrowserWindow, ipcMain, dialog } from 'electron';
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Dynamic imports for ESM packages
+let TelegramClient, StringSession, NewMessage;
+let Mistral;
+
+// Load ESM modules
+async function loadModules() {
+  const telegram = await import('telegram');
+  const sessions = await import('telegram/sessions');
+  const events = await import('telegram/events');
+  const mistral = await import('@mistralai/mistralai');
+  
+  TelegramClient = telegram.TelegramClient;
+  StringSession = sessions.StringSession;
+  NewMessage = events.NewMessage;
+  Mistral = mistral.Mistral;
+}
 
 let mainWindow = null;
 let telegramClient = null;
@@ -220,11 +237,8 @@ async function startBot(config) {
     // Connect
     await telegramClient.start({
       phoneNumber: async () => {
-        // This will be called if no session exists
         addLog('Please enter phone number in console...', 'System', 'system');
         return await new Promise((resolve) => {
-          // For first-time login, we need interactive input
-          // This is handled by the 'input' package
           const readline = require('readline');
           const rl = readline.createInterface({
             input: process.stdin,
@@ -339,12 +353,12 @@ function createWindow() {
     height: 650,
     minWidth: 450,
     minHeight: 550,
-    title: '🥷 Ninja Bot',
+    title: 'Ninja Bot',
     icon: path.join(__dirname, 'icon.ico'),
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      preload: path.join(__dirname, 'preload.js')
+      preload: path.join(__dirname, 'preload.cjs')
     },
     backgroundColor: '#1a1a2e',
     show: false,
@@ -363,7 +377,10 @@ function createWindow() {
 }
 
 // App ready
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  // Load ESM modules first
+  await loadModules();
+  
   loadLogs();
   createWindow();
 
