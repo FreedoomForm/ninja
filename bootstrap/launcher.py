@@ -2,6 +2,7 @@
 Ninja Launcher (compiled to ninja.exe)
 --------------------------------------
 Downloads embedded Python, installs dependencies, and launches the app.
+Hides console window on Windows.
 """
 
 import io
@@ -13,6 +14,16 @@ import time
 import urllib.request
 import zipfile
 from pathlib import Path
+
+# Try to hide console window on Windows
+if sys.platform == 'win32':
+    try:
+        import ctypes
+        console_hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if console_hwnd:
+            ctypes.windll.user32.ShowWindow(console_hwnd, 0)  # SW_HIDE
+    except:
+        pass
 
 # ---------------------------------------------------------------------------
 # config
@@ -35,6 +46,7 @@ APPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")
 ROOT = APPDATA / APP_NAME
 PY_DIR = ROOT / "python"
 APP_DIR = ROOT / "app"
+WEB_DIR = APP_DIR / "web"
 PY_EXE = PY_DIR / "python.exe"
 MARK = ROOT / ".installed"
 LOG_FILE = ROOT / "launcher.log"
@@ -83,15 +95,17 @@ def install_python() -> None:
         stderr=subprocess.DEVNULL
     )
     getpip.unlink(missing_ok=True)
+    
+    # Download pythonw.exe from full Python to hide console
+    # Note: embedded Python doesn't include pythonw.exe
+    # We'll use subprocess.CREATE_NO_WINDOW instead
+    log("Python installation complete")
 
 
 def fetch_app() -> None:
     log("Fetching app sources...")
     APP_DIR.mkdir(parents=True, exist_ok=True)
-    
-    # Create web directory
-    web_dir = APP_DIR / "web"
-    web_dir.mkdir(exist_ok=True)
+    WEB_DIR.mkdir(exist_ok=True)
     
     cache_buster = int(time.time())
     
@@ -100,7 +114,7 @@ def fetch_app() -> None:
         download(f"{RAW_BASE}/{name}?t={cache_buster}", APP_DIR / name)
     
     # Download web files
-    download(f"{RAW_BASE}/web/index.html?t={cache_buster}", web_dir / "index.html")
+    download(f"{RAW_BASE}/web/index.html?t={cache_buster}", WEB_DIR / "index.html")
 
 
 def pip_install() -> None:
@@ -141,11 +155,17 @@ def run_app() -> int:
     main_py = APP_DIR / "main.py"
     log(f"Launching {main_py}")
     
-    # Run with pythonw.exe to hide console (if available)
-    pythonw = PY_DIR / "pythonw.exe"
-    python_exe = pythonw if pythonw.exists() else PY_EXE
+    # Use CREATE_NO_WINDOW to hide console (works with embedded Python)
+    # 0x08000000 = CREATE_NO_WINDOW
+    if sys.platform == 'win32':
+        result = subprocess.call(
+            [str(PY_EXE), str(main_py)],
+            creationflags=0x08000000
+        )
+    else:
+        result = subprocess.call([str(PY_EXE), str(main_py)])
     
-    return subprocess.call([str(python_exe), str(main_py)])
+    return result
 
 
 def main() -> int:

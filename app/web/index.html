@@ -207,44 +207,65 @@
         }
         
         async function updateStatus() {
-            const data = await eel.get_status()();
-            document.getElementById('statusBadge').textContent = data.running ? 'Online' : 'Offline';
-            document.getElementById('statusBadge').className = 'status-badge ' + (data.running ? 'status-online' : 'status-offline');
-            document.getElementById('statStatus').textContent = data.running ? 'Running' : 'Stopped';
-            document.getElementById('statMessages').textContent = data.message_count;
-            document.getElementById('statUser').textContent = data.username || '-';
-            document.getElementById('startBtn').disabled = data.running;
-            document.getElementById('stopBtn').disabled = !data.running;
+            try {
+                const data = await eel.get_status()();
+                document.getElementById('statusBadge').textContent = data.running ? 'Online' : 'Offline';
+                document.getElementById('statusBadge').className = 'status-badge ' + (data.running ? 'status-online' : 'status-offline');
+                document.getElementById('statStatus').textContent = data.running ? 'Running' : 'Stopped';
+                document.getElementById('statMessages').textContent = data.message_count;
+                document.getElementById('statUser').textContent = data.username || '-';
+                document.getElementById('startBtn').disabled = data.running;
+                document.getElementById('stopBtn').disabled = !data.running;
+            } catch(e) {
+                console.error('updateStatus error:', e);
+            }
         }
         
         async function loadConfig() {
-            const data = await eel.get_config()();
-            document.getElementById('apiId').value = data.api_id || '';
-            document.getElementById('apiHash').value = data.api_hash || '';
-            document.getElementById('mistralKey').value = data.mistral_key || '';
-            document.getElementById('mistralModel').value = data.mistral_model || '';
-            document.getElementById('systemPrompt').value = data.system_prompt || '';
+            try {
+                const data = await eel.get_config()();
+                document.getElementById('apiId').value = data.api_id || '';
+                document.getElementById('apiHash').value = data.api_hash || '';
+                document.getElementById('mistralKey').value = data.mistral_key || '';
+                document.getElementById('mistralModel').value = data.mistral_model || '';
+                document.getElementById('systemPrompt').value = data.system_prompt || '';
+            } catch(e) {
+                console.error('loadConfig error:', e);
+            }
         }
         
         async function saveConfig() {
-            await eel.save_config_api({
-                api_id: document.getElementById('apiId').value,
-                api_hash: document.getElementById('apiHash').value,
-                mistral_key: document.getElementById('mistralKey').value,
-                mistral_model: document.getElementById('mistralModel').value,
-                system_prompt: document.getElementById('systemPrompt').value
-            })();
-            alert('Settings saved!');
+            try {
+                await eel.save_config_api({
+                    api_id: document.getElementById('apiId').value,
+                    api_hash: document.getElementById('apiHash').value,
+                    mistral_key: document.getElementById('mistralKey').value,
+                    mistral_model: document.getElementById('mistralModel').value,
+                    system_prompt: document.getElementById('systemPrompt').value
+                })();
+                alert('Settings saved!');
+            } catch(e) {
+                console.error('saveConfig error:', e);
+                alert('Error saving settings: ' + e);
+            }
         }
         
         async function startBot() {
-            await eel.start_bot()();
-            updateStatus();
+            try {
+                await eel.start_bot()();
+                updateStatus();
+            } catch(e) {
+                console.error('startBot error:', e);
+            }
         }
         
         async function stopBot() {
-            await eel.stop_bot()();
-            updateStatus();
+            try {
+                await eel.stop_bot()();
+                updateStatus();
+            } catch(e) {
+                console.error('stopBot error:', e);
+            }
         }
         
         function renderLogs(logs) {
@@ -259,15 +280,23 @@
         }
         
         async function loadLogs() {
-            const logs = await eel.get_logs()();
-            const html = renderLogs(logs);
-            document.getElementById('logsList').innerHTML = html;
-            document.getElementById('controlLogs').innerHTML = html;
+            try {
+                const logs = await eel.get_logs()();
+                const html = renderLogs(logs);
+                document.getElementById('logsList').innerHTML = html;
+                document.getElementById('controlLogs').innerHTML = html;
+            } catch(e) {
+                console.error('loadLogs error:', e);
+            }
         }
         
         async function clearLogs() {
-            await eel.clear_logs()();
-            loadLogs();
+            try {
+                await eel.clear_logs()();
+                loadLogs();
+            } catch(e) {
+                console.error('clearLogs error:', e);
+            }
         }
         
         // Initialize

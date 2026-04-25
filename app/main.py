@@ -19,12 +19,14 @@ from telethon.tl.types import User
 
 # ---------------------------------------------------------------------------
 # Configuration
+# Use same directory as launcher (%LOCALAPPDATA%\Ninja)
 # ---------------------------------------------------------------------------
-DATA_DIR = Path(os.environ.get("NINJA_DATA_DIR", Path.home() / ".ninja"))
+DATA_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Ninja"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 SESSION_PATH = DATA_DIR / "ninja"
 CONFIG_FILE = DATA_DIR / "config.txt"
 LOGS_FILE = DATA_DIR / "logs.json"
+DEBUG_LOG = DATA_DIR / "debug.log"
 
 DEFAULT_CONFIG = {
     "api_id": "36244324",
@@ -42,6 +44,15 @@ message_logs: list[dict] = []
 bot = None
 
 
+def debug_log(msg: str) -> None:
+    """Write to debug log file"""
+    try:
+        with open(DEBUG_LOG, "a", encoding="utf-8") as f:
+            f.write(f"{datetime.now().strftime('%H:%M:%S')} | {msg}\n")
+    except:
+        pass
+
+
 def load_config() -> dict:
     config = DEFAULT_CONFIG.copy()
     if CONFIG_FILE.exists():
@@ -51,15 +62,18 @@ def load_config() -> dict:
                     if "=" in line:
                         key, value = line.strip().split("=", 1)
                         config[key] = value
-        except Exception:
-            pass
+        except Exception as e:
+            debug_log(f"Load config error: {e}")
     return config
 
 
 def save_config(config: dict) -> None:
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        for key, value in config.items():
-            f.write(f"{key}={value}\n")
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            for key, value in config.items():
+                f.write(f"{key}={value}\n")
+    except Exception as e:
+        debug_log(f"Save config error: {e}")
 
 
 def load_logs() -> list:
@@ -111,6 +125,7 @@ def add_log(message: str, sender: str = "System", direction: str = "system") -> 
     }
     message_logs.append(entry)
     save_logs()
+    debug_log(f"[{direction}] {sender}: {message}")
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +247,7 @@ class TelegramBot:
             
         except Exception as e:
             add_log(f"Error: {e}", "System", "error")
+            debug_log(f"Bot error: {e}")
             self.running = False
 
     def start(self):
@@ -333,18 +349,42 @@ def main():
     global message_logs
     message_logs = load_logs()
     
+    debug_log("=" * 50)
+    debug_log("Ninja Bot Starting (eel)")
+    debug_log("=" * 50)
+    
     # Initialize eel with web folder
     web_dir = Path(__file__).parent / "web"
+    debug_log(f"Web directory: {web_dir}")
+    debug_log(f"Web dir exists: {web_dir.exists()}")
     
     eel.init(str(web_dir))
     
-    # Start the app
-    eel.start(
-        "index.html",
-        size=(550, 650),
-        resizable=True,
-        mode="chrome-app"
-    )
+    # Start the app - try chrome first, then edge, then default browser
+    try:
+        debug_log("Starting with Chrome app mode...")
+        eel.start(
+            "index.html",
+            size=(550, 650),
+            resizable=True,
+            mode="chrome-app"
+        )
+    except Exception as e:
+        debug_log(f"Chrome failed: {e}, trying Edge...")
+        try:
+            eel.start(
+                "index.html",
+                size=(550, 650),
+                resizable=True,
+                mode="edge"
+            )
+        except Exception as e2:
+            debug_log(f"Edge failed: {e2}, trying default browser...")
+            eel.start(
+                "index.html",
+                size=(550, 650),
+                resizable=True
+            )
 
 
 if __name__ == "__main__":
