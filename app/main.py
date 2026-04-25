@@ -1,25 +1,85 @@
 """
-Ninja Auto-Reply with Web UI
------------------------------
-Telegram auto-reply bot with Mistral AI and Flask Web Interface
+Ninja Auto-Reply - Native Windows Application
+----------------------------------------------
+Telegram auto-reply bot with Mistral AI and Native Windows GUI
+Uses Win32 API via ctypes (no external GUI dependencies needed)
 """
 
 import asyncio
+import ctypes
+import ctypes.wintypes as wintypes
 import json
 import logging
 import os
 import sys
 import threading
-import webbrowser
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
 import httpx
-from flask import Flask, render_template_string, request, jsonify
-from flask_cors import CORS
 from telethon import TelegramClient, events
 from telethon.tl.types import User
+
+# ---------------------------------------------------------------------------
+# Win32 API Constants
+# ---------------------------------------------------------------------------
+WM_CLOSE = 0x0010
+WM_COMMAND = 0x0111
+WM_TIMER = 0x0113
+WM_PAINT = 0x000F
+WM_DESTROY = 0x0002
+
+WS_OVERLAPPED = 0x00000000
+WS_CAPTION = 0x00C00000
+WS_SYSMENU = 0x00080000
+WS_MINIMIZEBOX = 0x00020000
+WS_VISIBLE = 0x10000000
+WS_VSCROLL = 0x00200000
+WS_BORDER = 0x00800000
+WS_CHILD = 0x40000000
+
+BS_PUSHBUTTON = 0x00000000
+BS_DEFPUSHBUTTON = 0x00000001
+
+SS_LEFT = 0x00000000
+
+LBS_NOTIFY = 0x00000001
+LBS_NOINTEGRALHEIGHT = 0x01000000
+
+ES_MULTILINE = 0x0004
+ES_READONLY = 0x0800
+ES_AUTOVSCROLL = 0x0040
+
+CW_USEDEFAULT = -2147483648
+
+IDC_ARROW = 32512
+COLOR_BTNFACE = 15
+
+SW_SHOW = 5
+SW_SHOWDEFAULT = 10
+
+MB_ICONINFORMATION = 0x40
+MB_YESNO = 0x04
+IDYES = 6
+
+# Timer ID
+TIMER_ID = 1
+
+# ---------------------------------------------------------------------------
+# Win32 API Functions
+# ---------------------------------------------------------------------------
+user32 = ctypes.windll.user32
+kernel32 = ctypes.windll.kernel32
+gdi32 = ctypes.windll.gdi32
+
+WNDPROC = ctypes.CFUNCTYPE(
+    ctypes.c_int,
+    ctypes.c_void_p,
+    ctypes.c_uint,
+    ctypes.c_void_p,
+    ctypes.c_void_p
+)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -30,11 +90,6 @@ SESSION_PATH = DATA_DIR / "ninja"
 CONFIG_FILE = DATA_DIR / "config.txt"
 LOGS_FILE = DATA_DIR / "logs.json"
 
-# Server config
-HOST = "127.0.0.1"
-PORT = 58765
-
-# Default values
 DEFAULT_CONFIG = {
     "api_id": "36244324",
     "api_hash": "15657d847ab4b8ae111ade8e2cbca51f",
@@ -43,14 +98,10 @@ DEFAULT_CONFIG = {
     "system_prompt": "You are the personal AI assistant replying on behalf of the account owner in Telegram private chats. Be friendly, concise, and natural. Reply in the same language the user wrote in.",
 }
 
-# Conversation memory
 HISTORY_LIMIT = 12
 _history: dict[int, list[dict]] = {}
-
-# Message logs (in memory, saved to file)
 message_logs: list[dict] = []
 
-# Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("ninja")
 
@@ -88,7 +139,7 @@ def load_logs() -> list:
 def save_logs() -> None:
     try:
         with open(LOGS_FILE, "w", encoding="utf-8") as f:
-            json.dump(message_logs[-500:], f, indent=2)  # Keep last 500
+            json.dump(message_logs[-500:], f, indent=2)
     except Exception:
         pass
 
@@ -198,7 +249,6 @@ class TelegramBot:
             self.running = True
             add_log(f"Logged in as {self.username}", "System", "success")
             
-            # Process unread messages AND last messages in all private chats
             add_log("Checking messages...", "System", "system")
             unread_count = 0
             
@@ -206,7 +256,6 @@ class TelegramBot:
                 try:
                     entity = dialog.entity
                     
-                    # Skip non-users
                     if not isinstance(entity, User):
                         continue
                     if entity.is_self or getattr(entity, 'bot', False):
@@ -214,7 +263,6 @@ class TelegramBot:
                     
                     sender_name = entity.first_name or entity.last_name or str(entity.id)
                     
-                    # Process unread messages first
                     if dialog.unread_count > 0:
                         add_log(f"Found {dialog.unread_count} unread from {sender_name}", "System", "system")
                         
@@ -230,11 +278,8 @@ class TelegramBot:
                         await self.client.send_read_acknowledge(dialog.entity)
                     
                     else:
-                        # Check last message - if it's from them and not answered, reply
                         async for message in self.client.iter_messages(dialog.entity, limit=1):
                             if message and not message.out and message.text:
-                                # Check if this message is recent (within last 24 hours)
-                                from datetime import datetime, timedelta
                                 msg_time = message.date.replace(tzinfo=None) if message.date.tzinfo else message.date
                                 if datetime.utcnow() - msg_time < timedelta(hours=24):
                                     add_log(f"Replying to last message from {sender_name}", "System", "system")
@@ -284,390 +329,209 @@ class TelegramBot:
 
 
 # ---------------------------------------------------------------------------
-# Flask Web App
+# Native Windows GUI
 # ---------------------------------------------------------------------------
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🥷 Ninja Bot</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-            min-height: 100vh;
-            color: #fff;
-        }
-        .container { max-width: 1000px; margin: 0 auto; padding: 20px; }
-        
-        /* Header */
-        .header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 20px;
-            background: rgba(255,255,255,0.05);
-            border-radius: 16px;
-            margin-bottom: 20px;
-        }
-        .header h1 { display: flex; align-items: center; gap: 10px; font-size: 24px; }
-        .header h1 span { font-size: 32px; }
-        .status-badge {
-            padding: 8px 16px;
-            border-radius: 20px;
-            font-weight: 600;
-            font-size: 14px;
-        }
-        .status-online { background: #10b981; }
-        .status-offline { background: #6b7280; }
-        
-        /* Stats */
-        .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 20px; }
-        .stat-card {
-            background: rgba(255,255,255,0.05);
-            border-radius: 12px;
-            padding: 20px;
-            text-align: center;
-        }
-        .stat-card .value { font-size: 28px; font-weight: bold; color: #10b981; }
-        .stat-card .label { color: #9ca3af; font-size: 14px; margin-top: 5px; }
-        
-        /* Tabs */
-        .tabs { display: flex; gap: 5px; margin-bottom: 20px; }
-        .tab {
-            padding: 12px 24px;
-            background: rgba(255,255,255,0.05);
-            border: none;
-            color: #9ca3af;
-            cursor: pointer;
-            border-radius: 8px;
-            font-size: 14px;
-            transition: all 0.2s;
-        }
-        .tab.active { background: #10b981; color: #fff; }
-        .tab:hover { background: rgba(255,255,255,0.1); }
-        
-        /* Content */
-        .content {
-            background: rgba(255,255,255,0.05);
-            border-radius: 16px;
-            padding: 20px;
-            min-height: 400px;
-        }
-        .tab-content { display: none; }
-        .tab-content.active { display: block; }
-        
-        /* Buttons */
-        .btn {
-            padding: 12px 24px;
-            border: none;
-            border-radius: 8px;
-            font-size: 14px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-        .btn-primary { background: #10b981; color: #fff; }
-        .btn-primary:hover { background: #059669; }
-        .btn-danger { background: #ef4444; color: #fff; }
-        .btn-danger:hover { background: #dc2626; }
-        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-        
-        /* Form */
-        .form-group { margin-bottom: 20px; }
-        .form-group label { display: block; margin-bottom: 8px; color: #9ca3af; font-size: 14px; }
-        .form-group input, .form-group textarea {
-            width: 100%;
-            padding: 12px;
-            background: rgba(0,0,0,0.3);
-            border: 1px solid rgba(255,255,255,0.1);
-            border-radius: 8px;
-            color: #fff;
-            font-size: 14px;
-        }
-        .form-group input:focus, .form-group textarea:focus {
-            outline: none;
-            border-color: #10b981;
-        }
-        .form-group small { color: #6b7280; font-size: 12px; }
-        
-        /* Logs */
-        .logs { max-height: 400px; overflow-y: auto; }
-        .log-entry {
-            padding: 12px;
-            border-bottom: 1px solid rgba(255,255,255,0.05);
-            display: flex;
-            gap: 12px;
-        }
-        .log-entry:last-child { border-bottom: none; }
-        .log-time { color: #6b7280; font-size: 12px; min-width: 60px; }
-        .log-sender { color: #10b981; min-width: 100px; font-weight: 500; }
-        .log-message { color: #e5e7eb; flex: 1; }
-        .log-incoming { border-left: 3px solid #3b82f6; }
-        .log-outgoing { border-left: 3px solid #10b981; }
-        .log-system { border-left: 3px solid #6b7280; }
-        .log-error { border-left: 3px solid #ef4444; }
-        .log-success { border-left: 3px solid #10b981; }
-        
-        /* Control buttons */
-        .control-buttons { display: flex; gap: 15px; margin-bottom: 20px; }
-        
-        /* Empty state */
-        .empty-state { text-align: center; padding: 60px 20px; color: #6b7280; }
-        .empty-state .icon { font-size: 48px; margin-bottom: 15px; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <!-- Header -->
-        <div class="header">
-            <h1><span>🥷</span> Ninja Bot</h1>
-            <div id="statusBadge" class="status-badge status-offline">Offline</div>
-        </div>
-        
-        <!-- Stats -->
-        <div class="stats">
-            <div class="stat-card">
-                <div id="statStatus" class="value">Stopped</div>
-                <div class="label">Status</div>
-            </div>
-            <div class="stat-card">
-                <div id="statMessages" class="value">0</div>
-                <div class="label">Messages</div>
-            </div>
-            <div class="stat-card">
-                <div id="statUser" class="value">-</div>
-                <div class="label">Account</div>
-            </div>
-        </div>
-        
-        <!-- Tabs -->
-        <div class="tabs">
-            <button class="tab active" onclick="showTab('control')">🎮 Control</button>
-            <button class="tab" onclick="showTab('settings')">⚙️ Settings</button>
-            <button class="tab" onclick="showTab('logs')">📋 Logs</button>
-        </div>
-        
-        <!-- Content -->
-        <div class="content">
-            <!-- Control Tab -->
-            <div id="tab-control" class="tab-content active">
-                <div class="control-buttons">
-                    <button id="startBtn" class="btn btn-primary" onclick="startBot()">▶️ Start Bot</button>
-                    <button id="stopBtn" class="btn btn-danger" onclick="stopBot()" disabled>⏹️ Stop Bot</button>
-                </div>
-                <div class="logs" id="controlLogs"></div>
-            </div>
-            
-            <!-- Settings Tab -->
-            <div id="tab-settings" class="tab-content">
-                <div class="form-group">
-                    <label>Telegram API ID</label>
-                    <input type="text" id="apiId" placeholder="12345678">
-                    <small>Get from <a href="https://my.telegram.org" target="_blank" style="color:#10b981">my.telegram.org</a></small>
-                </div>
-                <div class="form-group">
-                    <label>Telegram API Hash</label>
-                    <input type="password" id="apiHash" placeholder="Enter your API hash">
-                </div>
-                <div class="form-group">
-                    <label>Mistral API Key</label>
-                    <input type="password" id="mistralKey" placeholder="Enter your Mistral API key">
-                    <small>Get from <a href="https://console.mistral.ai" target="_blank" style="color:#10b981">console.mistral.ai</a></small>
-                </div>
-                <div class="form-group">
-                    <label>Mistral Model</label>
-                    <input type="text" id="mistralModel" placeholder="mistral-small-latest">
-                </div>
-                <div class="form-group">
-                    <label>System Prompt</label>
-                    <textarea id="systemPrompt" rows="4" placeholder="Instructions for the AI..."></textarea>
-                </div>
-                <button class="btn btn-primary" onclick="saveConfig()">💾 Save Settings</button>
-            </div>
-            
-            <!-- Logs Tab -->
-            <div id="tab-logs" class="tab-content">
-                <div style="margin-bottom: 15px;">
-                    <button class="btn" onclick="clearLogs()" style="background:#374151;">Clear Logs</button>
-                </div>
-                <div class="logs" id="logsList"></div>
-            </div>
-        </div>
-    </div>
+class NativeWindow:
+    """Native Windows GUI using Win32 API via ctypes"""
     
-    <script>
-        function showTab(tabName) {
-            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-            event.target.classList.add('active');
-            document.getElementById('tab-' + tabName).classList.add('active');
-        }
+    def __init__(self, bot: TelegramBot):
+        self.bot = bot
+        self.hwnd = None
+        self.hwnd_status = None
+        self.hwnd_start_btn = None
+        self.hwnd_stop_btn = None
+        self.hwnd_log_list = None
+        self.hwnd_user_label = None
+        self.hwnd_msg_label = None
+        self.running = True
         
-        function updateStatus() {
-            fetch('/api/status')
-                .then(r => r.json())
-                .then(data => {
-                    document.getElementById('statusBadge').textContent = data.running ? 'Online' : 'Offline';
-                    document.getElementById('statusBadge').className = 'status-badge ' + (data.running ? 'status-online' : 'status-offline');
-                    document.getElementById('statStatus').textContent = data.running ? 'Running' : 'Stopped';
-                    document.getElementById('statMessages').textContent = data.message_count;
-                    document.getElementById('statUser').textContent = data.username || '-';
-                    
-                    document.getElementById('startBtn').disabled = data.running;
-                    document.getElementById('stopBtn').disabled = !data.running;
-                });
-        }
+        # Register window class
+        self.wndclass = wintypes.WNDCLASSW()
+        self.wndclass.lpszClassName = "NinjaBotClass"
+        self.wndclass.lpfnWndProc = WNDPROC(self.wnd_proc)
+        self.wndclass.hInstance = kernel32.GetModuleHandleW(None)
+        self.wndclass.hCursor = user32.LoadCursorW(None, IDC_ARROW)
+        self.wndclass.hbrBackground = (gdi32.GetStockObject(4),)  # LTGRAY_BRUSH
         
-        function loadConfig() {
-            fetch('/api/config')
-                .then(r => r.json())
-                .then(data => {
-                    document.getElementById('apiId').value = data.api_id || '';
-                    document.getElementById('apiHash').value = data.api_hash || '';
-                    document.getElementById('mistralKey').value = data.mistral_key || '';
-                    document.getElementById('mistralModel').value = data.mistral_model || '';
-                    document.getElementById('systemPrompt').value = data.system_prompt || '';
-                });
-        }
+        user32.RegisterClassW(ctypes.byref(self.wndclass))
         
-        function saveConfig() {
-            const config = {
-                api_id: document.getElementById('apiId').value,
-                api_hash: document.getElementById('apiHash').value,
-                mistral_key: document.getElementById('mistralKey').value,
-                mistral_model: document.getElementById('mistralModel').value,
-                system_prompt: document.getElementById('systemPrompt').value
-            };
-            fetch('/api/config', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(config)
-            }).then(() => alert('Settings saved!'));
-        }
-        
-        function startBot() {
-            fetch('/api/start', {method: 'POST'}).then(() => updateStatus());
-        }
-        
-        function stopBot() {
-            fetch('/api/stop', {method: 'POST'}).then(() => updateStatus());
-        }
-        
-        function loadLogs() {
-            fetch('/api/logs')
-                .then(r => r.json())
-                .then(data => {
-                    const html = data.reverse().map(log => {
-                        const cls = 'log-entry log-' + log.direction;
-                        return '<div class="' + cls + '">' +
-                            '<span class="log-time">' + log.timestamp + '</span>' +
-                            '<span class="log-sender">' + log.sender + '</span>' +
-                            '<span class="log-message">' + log.message + '</span>' +
-                            '</div>';
-                    }).join('');
-                    document.getElementById('logsList').innerHTML = html || '<div class="empty-state"><div class="icon">📋</div><p>No logs yet</p></div>';
-                    document.getElementById('controlLogs').innerHTML = html || '<div class="empty-state"><div class="icon">💬</div><p>Messages will appear here</p></div>';
-                });
-        }
-        
-        function clearLogs() {
-            fetch('/api/logs/clear', {method: 'POST'}).then(() => loadLogs());
-        }
-        
-        // Initialize
-        loadConfig();
-        updateStatus();
-        loadLogs();
-        setInterval(() => { updateStatus(); loadLogs(); }, 3000);
-    </script>
-</body>
-</html>
-"""
-
-
-def create_app():
-    app = Flask(__name__)
-    CORS(app)  # Allow requests from Next.js frontend
-    bot = TelegramBot()
-    
-    # Load logs
-    global message_logs
-    message_logs = load_logs()
-
-    @app.route('/')
-    def index():
-        return render_template_string(HTML_TEMPLATE)
-
-    @app.route('/api/status')
-    def api_status():
-        return jsonify({
-            "running": bot.running,
-            "username": bot.username,
-            "message_count": bot.message_count
-        })
-
-    @app.route('/api/config', methods=['GET'])
-    def get_config():
-        config = bot.config
-        return jsonify({
-            "api_id": config.get("api_id", ""),
-            "api_hash": config.get("api_hash", ""),
-            "mistral_key": config.get("mistral_key", ""),
-            "mistral_model": config.get("mistral_model", ""),
-            "system_prompt": config.get("system_prompt", "")
-        })
-
-    @app.route('/api/config', methods=['POST'])
-    def set_config():
-        data = request.json
-        bot.config.update(data)
-        save_config(bot.config)
-        return jsonify({"success": True})
-
-    @app.route('/api/start', methods=['POST'])
-    def start():
-        bot.start()
-        return jsonify({"success": True})
-
-    @app.route('/api/stop', methods=['POST'])
-    def stop():
-        bot.stop()
-        return jsonify({"success": True})
-
-    @app.route('/api/logs')
-    def get_logs():
-        return jsonify(message_logs)
-
-    @app.route('/api/logs/clear', methods=['POST'])
-    def clear_logs():
+        # Load logs
         global message_logs
-        message_logs = []
-        save_logs()
-        return jsonify({"success": True})
-
-    return app, bot
-
-
-def run_app():
-    app, bot = create_app()
+        message_logs = load_logs()
     
-    # Open browser
-    url = f"http://{HOST}:{PORT}"
-    print(f"\n{'='*50}")
-    print(f" 🥷 NINJA BOT - Web UI")
-    print(f"{'='*50}")
-    print(f"\n Opening browser: {url}")
-    print(f" If browser doesn't open, go to: {url}\n")
+    def wnd_proc(self, hwnd, msg, wparam, lparam):
+        """Window procedure - handles all window events"""
+        if msg == WM_COMMAND:
+            cmd = wparam & 0xFFFF
+            if cmd == 1:  # Start button
+                self.on_start()
+            elif cmd == 2:  # Stop button
+                self.on_stop()
+        elif msg == WM_TIMER:
+            self.update_ui()
+        elif msg == WM_CLOSE:
+            self.running = False
+            user32.KillTimer(hwnd, TIMER_ID)
+            user32.DestroyWindow(hwnd)
+        elif msg == WM_DESTROY:
+            user32.PostQuitMessage(0)
+            return 0
+        
+        return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
     
-    webbrowser.open(url)
+    def create_window(self):
+        """Create the main window and all controls"""
+        hinst = kernel32.GetModuleHandleW(None)
+        
+        # Main window
+        self.hwnd = user32.CreateWindowExW(
+            0, "NinjaBotClass", "Ninja Bot - Telegram Auto-Reply",
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE,
+            CW_USEDEFAULT, CW_USEDEFAULT, 500, 450,
+            None, None, hinst, None
+        )
+        
+        # Status label
+        self.hwnd_status = user32.CreateWindowExW(
+            0, "STATIC", "Status: Stopped",
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            20, 20, 200, 25,
+            self.hwnd, None, hinst, None
+        )
+        
+        # User label
+        self.hwnd_user_label = user32.CreateWindowExW(
+            0, "STATIC", "Account: -",
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            20, 50, 200, 25,
+            self.hwnd, None, hinst, None
+        )
+        
+        # Message count label
+        self.hwnd_msg_label = user32.CreateWindowExW(
+            0, "STATIC", "Messages: 0",
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            20, 80, 200, 25,
+            self.hwnd, None, hinst, None
+        )
+        
+        # Start button
+        self.hwnd_start_btn = user32.CreateWindowExW(
+            0, "BUTTON", "Start Bot",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            250, 20, 100, 35,
+            self.hwnd, 1, hinst, None
+        )
+        
+        # Stop button (disabled initially)
+        self.hwnd_stop_btn = user32.CreateWindowExW(
+            0, "BUTTON", "Stop Bot",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            360, 20, 100, 35,
+            self.hwnd, 2, hinst, None
+        )
+        user32.EnableWindow(self.hwnd_stop_btn, False)
+        
+        # Log listbox
+        user32.CreateWindowExW(
+            0, "STATIC", "Activity Log:",
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            20, 120, 200, 25,
+            self.hwnd, None, hinst, None
+        )
+        
+        self.hwnd_log_list = user32.CreateWindowExW(
+            0x200,  # WS_EX_CLIENTEDGE
+            "LISTBOX", "",
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_BORDER,
+            20, 145, 440, 250,
+            self.hwnd, None, hinst, None
+        )
+        
+        # Set timer for UI updates
+        user32.SetTimer(self.hwnd, TIMER_ID, 1000, None)
+        
+        return self.hwnd
     
-    # Start Flask
-    app.run(host=HOST, port=PORT, debug=False, use_reloader=False)
+    def on_start(self):
+        """Handle start button click"""
+        add_log("Starting bot...", "System", "system")
+        self.bot.start()
+    
+    def on_stop(self):
+        """Handle stop button click"""
+        self.bot.stop()
+    
+    def update_ui(self):
+        """Update UI elements based on bot state"""
+        if not self.running:
+            return
+        
+        # Update status
+        if self.bot.running:
+            status = "Status: Running"
+            user32.SetWindowTextW(self.hwnd_status, status)
+            user32.EnableWindow(self.hwnd_start_btn, False)
+            user32.EnableWindow(self.hwnd_stop_btn, True)
+        else:
+            status = "Status: Stopped"
+            user32.SetWindowTextW(self.hwnd_status, status)
+            user32.EnableWindow(self.hwnd_start_btn, True)
+            user32.EnableWindow(self.hwnd_stop_btn, False)
+        
+        # Update user
+        user = f"Account: {self.bot.username}" if self.bot.username else "Account: -"
+        user32.SetWindowTextW(self.hwnd_user_label, user)
+        
+        # Update message count
+        user32.SetWindowTextW(self.hwnd_msg_label, f"Messages: {self.bot.message_count}")
+        
+        # Update log list
+        # Only add new logs
+        current_count = user32.SendMessageW(self.hwnd_log_list, 0x018B, 0, 0)  # LB_GETCOUNT
+        new_logs = message_logs[current_count:]
+        for log_entry in new_logs:
+            text = f"[{log_entry['timestamp']}] {log_entry['sender']}: {log_entry['message']}"
+            user32.SendMessageW(self.hwnd_log_list, 0x0180, 0, text)  # LB_ADDSTRING
+        
+        # Scroll to bottom if new logs added
+        if new_logs:
+            count = user32.SendMessageW(self.hwnd_log_list, 0x018B, 0, 0)  # LB_GETCOUNT
+            user32.SendMessageW(self.hwnd_log_list, 0x197, count - 1, 0)  # LB_SETCURSEL
+    
+    def run(self):
+        """Main message loop"""
+        self.create_window()
+        
+        msg = wintypes.MSG()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0):
+            user32.TranslateMessage(ctypes.byref(msg))
+            user32.DispatchMessageW(ctypes.byref(msg))
+        
+        return msg.wParam
+
+
+# ---------------------------------------------------------------------------
+# Main Entry Point
+# ---------------------------------------------------------------------------
+def main():
+    print("=" * 50)
+    print(" Ninja Bot - Native Windows Application ")
+    print("=" * 50)
+    
+    bot = TelegramBot()
+    window = NativeWindow(bot)
+    
+    print("Starting native Windows GUI...")
+    window.run()
+    
+    # Cleanup
+    if bot.running:
+        bot.stop()
+    
+    print("Application closed.")
+    return 0
 
 
 if __name__ == "__main__":
-    run_app()
+    sys.exit(main())
