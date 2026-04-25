@@ -1,0 +1,50 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller==6.10.0
+
+      - name: Build ninja.exe
+        run: |
+          pyinstaller --onefile --console --name ninja --distpath dist bootstrap/launcher.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ninja-windows-exe
+          path: dist/ninja.exe
+
+      - name: Publish to "latest" release
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest build
+          body: |
+            Automatic build of `ninja.exe` from commit ${{ github.sha }}.
+            Run it on Windows; on first launch it installs everything into
+            `%LOCALAPPDATA%\Ninja` and starts auto-replying.
+          files: dist/ninja.exe
+          prerelease: false
+          make_latest: true
