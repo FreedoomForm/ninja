@@ -15,28 +15,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          node-version: '20'
+          python-version: "3.11"
 
-      - name: Install dependencies
-        working-directory: desktop-app
-        run: npm install
+      - name: Install PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller==6.10.0
 
-      - name: Build with esbuild
-        working-directory: desktop-app
-        run: npm run build:js
-
-      - name: Build portable EXE
-        working-directory: desktop-app
-        run: npm run build
+      - name: Build ninja.exe
+        run: |
+          pyinstaller --onefile --noconsole --name ninja --distpath dist bootstrap/launcher.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ninja-windows-exe
-          path: desktop-app/dist/NinjaBot.exe
+          path: dist/ninja.exe
 
       - name: Publish to "latest" release
         if: github.ref == 'refs/heads/main'
@@ -45,17 +42,17 @@ jobs:
           tag_name: latest
           name: Latest build
           body: |
-            Automatic build of `NinjaBot.exe` from commit ${{ github.sha }}.
+            Automatic build of `ninja.exe` from commit ${{ github.sha }}.
             
-            **Pure Native Windows Application** - No Python, No Console!
+            **Native Windows Application** - Uses eel for native window
             
             Features:
-            - Native Windows desktop app (Electron)
+            - Native Windows desktop app
             - Telegram auto-reply with Mistral AI
-            - No terminal/console window
-            - Standalone portable EXE
+            - No browser needed - uses Chrome app mode
+            - Standalone EXE
             
-            On first login, you'll need to enter your Telegram phone number and verification code in the console that appears.
-          files: desktop-app/dist/NinjaBot.exe
+            On first login, you'll need to enter your Telegram phone number and verification code.
+          files: dist/ninja.exe
           prerelease: false
           make_latest: true

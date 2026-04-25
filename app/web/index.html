@@ -197,9 +197,8 @@
         </div>
     </div>
 
+    <script type="text/javascript" src="/eel.js"></script>
     <script>
-        let currentLogs = [];
-        
         function showTab(tabName) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
@@ -208,44 +207,43 @@
         }
         
         async function updateStatus() {
-            const data = await window.api.getStatus();
+            const data = await eel.get_status()();
             document.getElementById('statusBadge').textContent = data.running ? 'Online' : 'Offline';
             document.getElementById('statusBadge').className = 'status-badge ' + (data.running ? 'status-online' : 'status-offline');
             document.getElementById('statStatus').textContent = data.running ? 'Running' : 'Stopped';
-            document.getElementById('statMessages').textContent = data.messageCount;
+            document.getElementById('statMessages').textContent = data.message_count;
             document.getElementById('statUser').textContent = data.username || '-';
             document.getElementById('startBtn').disabled = data.running;
             document.getElementById('stopBtn').disabled = !data.running;
         }
         
         async function loadConfig() {
-            const data = await window.api.getConfig();
-            document.getElementById('apiId').value = data.apiId || '';
-            document.getElementById('apiHash').value = data.apiHash || '';
-            document.getElementById('mistralKey').value = data.mistralKey || '';
-            document.getElementById('mistralModel').value = data.mistralModel || '';
-            document.getElementById('systemPrompt').value = data.systemPrompt || '';
+            const data = await eel.get_config()();
+            document.getElementById('apiId').value = data.api_id || '';
+            document.getElementById('apiHash').value = data.api_hash || '';
+            document.getElementById('mistralKey').value = data.mistral_key || '';
+            document.getElementById('mistralModel').value = data.mistral_model || '';
+            document.getElementById('systemPrompt').value = data.system_prompt || '';
         }
         
         async function saveConfig() {
-            const config = {
-                apiId: document.getElementById('apiId').value,
-                apiHash: document.getElementById('apiHash').value,
-                mistralKey: document.getElementById('mistralKey').value,
-                mistralModel: document.getElementById('mistralModel').value,
-                systemPrompt: document.getElementById('systemPrompt').value
-            };
-            await window.api.saveConfig(config);
+            await eel.save_config_api({
+                api_id: document.getElementById('apiId').value,
+                api_hash: document.getElementById('apiHash').value,
+                mistral_key: document.getElementById('mistralKey').value,
+                mistral_model: document.getElementById('mistralModel').value,
+                system_prompt: document.getElementById('systemPrompt').value
+            })();
             alert('Settings saved!');
         }
         
         async function startBot() {
-            await window.api.startBot();
+            await eel.start_bot()();
             updateStatus();
         }
         
         async function stopBot() {
-            await window.api.stopBot();
+            await eel.stop_bot()();
             updateStatus();
         }
         
@@ -261,42 +259,23 @@
         }
         
         async function loadLogs() {
-            const logs = await window.api.getLogs();
-            currentLogs = logs;
+            const logs = await eel.get_logs()();
             const html = renderLogs(logs);
             document.getElementById('logsList').innerHTML = html;
             document.getElementById('controlLogs').innerHTML = html;
         }
         
         async function clearLogs() {
-            await window.api.clearLogs();
-            currentLogs = [];
+            await eel.clear_logs()();
             loadLogs();
         }
-        
-        // Listen for updates from main process
-        window.api.onStatusUpdate((data) => {
-            document.getElementById('statusBadge').textContent = data.running ? 'Online' : 'Offline';
-            document.getElementById('statusBadge').className = 'status-badge ' + (data.running ? 'status-online' : 'status-offline');
-            document.getElementById('statStatus').textContent = data.running ? 'Running' : 'Stopped';
-            document.getElementById('statMessages').textContent = data.messageCount;
-            document.getElementById('statUser').textContent = data.username || '-';
-            document.getElementById('startBtn').disabled = data.running;
-            document.getElementById('stopBtn').disabled = !data.running;
-        });
-        
-        window.api.onNewLog((log) => {
-            currentLogs.push(log);
-            const html = renderLogs(currentLogs);
-            document.getElementById('logsList').innerHTML = html;
-            document.getElementById('controlLogs').innerHTML = html;
-        });
         
         // Initialize
         loadConfig();
         updateStatus();
         loadLogs();
-        setInterval(updateStatus, 3000);
+        setInterval(updateStatus, 2000);
+        setInterval(loadLogs, 2000);
     </script>
 </body>
 </html>
