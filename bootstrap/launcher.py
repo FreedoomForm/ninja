@@ -186,6 +186,8 @@ def update_app_quietly() -> None:
     """Always pull fresh main.py / requirements.txt; ignore network errors."""
     try:
         fetch_app()
+        # Always run pip install to ensure new dependencies are installed
+        pip_install()
     except Exception as e:
         log(f"(could not refresh sources: {e}) — using local copy")
 
