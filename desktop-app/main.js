@@ -1,27 +1,9 @@
-import { app, BrowserWindow, ipcMain, dialog } from 'electron';
-import path from 'path';
-import fs from 'fs';
-import { fileURLToPath } from 'url';
+const { app, BrowserWindow, ipcMain } = require('electron');
+const path = require('path');
+const fs = require('fs');
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// Dynamic imports for ESM packages
-let TelegramClient, StringSession, NewMessage;
-let Mistral;
-
-// Load ESM modules
-async function loadModules() {
-  const telegram = await import('telegram');
-  const sessions = await import('telegram/sessions');
-  const events = await import('telegram/events');
-  const mistral = await import('@mistralai/mistralai');
-  
-  TelegramClient = telegram.TelegramClient;
-  StringSession = sessions.StringSession;
-  NewMessage = events.NewMessage;
-  Mistral = mistral.Mistral;
-}
+// ESM modules (loaded dynamically)
+let TelegramClient, StringSession, NewMessage, Mistral;
 
 let mainWindow = null;
 let telegramClient = null;
@@ -56,6 +38,19 @@ const HISTORY_LIMIT = 12;
 
 // Logs
 let logs = [];
+
+// Load ESM modules dynamically
+async function loadModules() {
+  const telegram = await import('telegram');
+  const sessions = await import('telegram/sessions');
+  const events = await import('telegram/events');
+  const mistral = await import('@mistralai/mistralai');
+  
+  TelegramClient = telegram.TelegramClient;
+  StringSession = sessions.StringSession;
+  NewMessage = events.NewMessage;
+  Mistral = mistral.Mistral;
+}
 
 // Load config
 function loadConfig() {
@@ -358,7 +353,7 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      preload: path.join(__dirname, 'preload.cjs')
+      preload: path.join(__dirname, 'preload.js')
     },
     backgroundColor: '#1a1a2e',
     show: false,
