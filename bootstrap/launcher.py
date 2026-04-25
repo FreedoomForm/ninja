@@ -50,6 +50,7 @@ WEB_DIR = APP_DIR / "web"
 PY_EXE = PY_DIR / "python.exe"
 MARK = ROOT / ".installed"
 LOG_FILE = ROOT / "launcher.log"
+INSTALL_LOG = ROOT / "install.log"
 
 
 def log(msg: str) -> None:
@@ -81,24 +82,35 @@ def install_python() -> None:
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         zf.extractall(PY_DIR)
 
+    # Enable site-packages in embedded Python
     for pth in PY_DIR.glob("python*._pth"):
         text = pth.read_text()
-        text = text.replace("#import site", "import site")
-        pth.write_text(text)
+        # Add site-packages path and enable import site
+        lines = text.split('\n')
+        new_lines = []
+        for line in lines:
+            if line.strip() == "#import site":
+                new_lines.append("import site")
+            else:
+                new_lines.append(line)
+        # Add site-packages path
+        new_lines.append("Lib/site-packages")
+        pth.write_text('\n'.join(new_lines))
 
     getpip = ROOT / "get-pip.py"
     download(GETPIP_URL, getpip)
     log("Bootstrapping pip...")
-    subprocess.check_call(
-        [str(PY_EXE), str(getpip)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
-    getpip.unlink(missing_ok=True)
     
-    # Download pythonw.exe from full Python to hide console
-    # Note: embedded Python doesn't include pythonw.exe
-    # We'll use subprocess.CREATE_NO_WINDOW instead
+    # Run get-pip and capture output
+    result = subprocess.run(
+        [str(PY_EXE), str(getpip), "--no-warn-script-location"],
+        capture_output=True,
+        text=True
+    )
+    with open(INSTALL_LOG, "a", encoding="utf-8") as f:
+        f.write(f"=== get-pip output ===\n{result.stdout}\n{result.stderr}\n")
+    
+    getpip.unlink(missing_ok=True)
     log("Python installation complete")
 
 
@@ -117,9 +129,36 @@ def fetch_app() -> None:
     download(f"{RAW_BASE}/web/index.html?t={cache_buster}", WEB_DIR / "index.html")
 
 
-def pip_install() -> None:
+def pip_install() -> bool:
+    """Install dependencies. Returns True on success."""
     log("Installing Python dependencies...")
-    subprocess.check_call(
+    
+    # First, upgrade pip
+    subprocess.run(
+        [str(PY_EXE), "-m", "pip", "install", "--upgrade", "pip"],
+        capture_output=True
+    )
+    
+    # Install setuptools FIRST (required by eel for pkg_resources)
+    log("Installing setuptools...")
+    result = subprocess.run(
+        [str(PY_EXE), "-m", "pip", "install", 
+         "--no-warn-script-location",
+         "setuptools==69.0.0", "wheel"],
+        capture_output=True,
+        text=True
+    )
+    
+    with open(INSTALL_LOG, "a", encoding="utf-8") as f:
+        f.write(f"=== setuptools install ===\n{result.stdout}\n{result.stderr}\n")
+    
+    if result.returncode != 0:
+        log(f"ERROR: setuptools install failed: {result.stderr}")
+        return False
+    
+    # Now install the rest
+    log("Installing other dependencies...")
+    result = subprocess.run(
         [
             str(PY_EXE),
             "-m",
@@ -129,18 +168,30 @@ def pip_install() -> None:
             "-r",
             str(APP_DIR / "requirements.txt"),
         ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
+        capture_output=True,
+        text=True
     )
+    
+    with open(INSTALL_LOG, "a", encoding="utf-8") as f:
+        f.write(f"=== requirements install ===\n{result.stdout}\n{result.stderr}\n")
+    
+    if result.returncode != 0:
+        log(f"ERROR: requirements install failed: {result.stderr}")
+        return False
+    
+    log("Dependencies installed successfully")
+    return True
 
 
-def first_run() -> None:
+def first_run() -> bool:
     ROOT.mkdir(parents=True, exist_ok=True)
     install_python()
     fetch_app()
-    pip_install()
+    if not pip_install():
+        return False
     MARK.write_text("ok")
     log("Install complete ✓")
+    return True
 
 
 def update_app_quietly() -> None:
@@ -173,9 +224,17 @@ def main() -> int:
     log("Ninja Launcher Starting")
     log("=" * 50)
     
-    if not MARK.exists() or not PY_EXE.exists():
+    # Check if we need to force reinstall
+    force_reinstall = (ROOT / ".reinstall").exists()
+    if force_reinstall:
+        log("Force reinstall requested")
+        (ROOT / ".reinstall").unlink(missing_ok=True)
+    
+    if not MARK.exists() or not PY_EXE.exists() or force_reinstall:
         try:
-            first_run()
+            if not first_run():
+                log("FATAL: install failed - check install.log")
+                return 1
         except Exception as e:
             log(f"FATAL: install failed: {e}")
             return 1

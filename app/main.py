@@ -4,7 +4,6 @@ Uses eel for native window with HTML UI and Python backend
 """
 
 import asyncio
-import eel
 import json
 import os
 import sys
@@ -13,6 +12,16 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+# Fix for embedded Python - ensure pkg_resources is available
+try:
+    import pkg_resources
+except ImportError:
+    print("ERROR: setuptools/pkg_resources not installed!")
+    print("Please run: pip install setuptools")
+    input("Press Enter to exit...")
+    sys.exit(1)
+
+import eel
 import httpx
 from telethon import TelegramClient, events
 from telethon.tl.types import User
@@ -29,9 +38,9 @@ LOGS_FILE = DATA_DIR / "logs.json"
 DEBUG_LOG = DATA_DIR / "debug.log"
 
 DEFAULT_CONFIG = {
-    "api_id": "36244324",
-    "api_hash": "15657d847ab4b8ae111ade8e2cbca51f",
-    "mistral_key": "bz2Mp9E67ep1QfmaHzXBSJaRVOfIkx8v",
+    "api_id": "",
+    "api_hash": "",
+    "mistral_key": "",
     "mistral_model": "mistral-medium-latest",
     "system_prompt": "You are the personal AI assistant replying on behalf of the account owner in Telegram private chats. Be friendly, concise, and natural. Reply in the same language the user wrote in.",
 }
@@ -170,6 +179,15 @@ class TelegramBot:
 
     async def run_bot(self):
         try:
+            # Validate config
+            if not self.config.get("api_id") or not self.config.get("api_hash"):
+                add_log("ERROR: Please configure API ID and API Hash in Settings", "System", "error")
+                return
+            
+            if not self.config.get("mistral_key"):
+                add_log("ERROR: Please configure Mistral API Key in Settings", "System", "error")
+                return
+            
             self.client = TelegramClient(
                 str(SESSION_PATH),
                 int(self.config["api_id"]),
@@ -351,12 +369,20 @@ def main():
     
     debug_log("=" * 50)
     debug_log("Ninja Bot Starting (eel)")
+    debug_log(f"Python: {sys.executable}")
+    debug_log(f"Working dir: {os.getcwd()}")
     debug_log("=" * 50)
     
     # Initialize eel with web folder
     web_dir = Path(__file__).parent / "web"
     debug_log(f"Web directory: {web_dir}")
     debug_log(f"Web dir exists: {web_dir.exists()}")
+    
+    if not web_dir.exists():
+        debug_log("ERROR: Web directory not found!")
+        print(f"ERROR: Web directory not found: {web_dir}")
+        input("Press Enter to exit...")
+        return
     
     eel.init(str(web_dir))
     
@@ -380,11 +406,16 @@ def main():
             )
         except Exception as e2:
             debug_log(f"Edge failed: {e2}, trying default browser...")
-            eel.start(
-                "index.html",
-                size=(550, 650),
-                resizable=True
-            )
+            try:
+                eel.start(
+                    "index.html",
+                    size=(550, 650),
+                    resizable=True
+                )
+            except Exception as e3:
+                debug_log(f"All modes failed: {e3}")
+                print(f"ERROR: Could not start UI: {e3}")
+                input("Press Enter to exit...")
 
 
 if __name__ == "__main__":
