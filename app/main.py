@@ -16,8 +16,8 @@ import sys
 from pathlib import Path
 
 import httpx
-from telethon import TelegramClient, events, types
-from telethon.tl.types import User, PeerUser
+from telethon import TelegramClient, events, types, functions
+from telethon.tl.types import User, PeerUser, PeerChannel, PeerChat
 
 # ---------------------------------------------------------------------------
 # Hard-coded credentials (provided by user)
@@ -97,6 +97,56 @@ def _build_messages(chat_id: int) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Message handler function (shared between new messages and unread)
+# ---------------------------------------------------------------------------
+async def process_message(client: TelegramClient, event, message) -> None:
+    """Process a message and send auto-reply."""
+    chat_id = event.chat_id
+    
+    # Skip outgoing messages
+    if message.out:
+        return
+    
+    # Only reply to private chats
+    if not event.is_private:
+        return
+    
+    # Get sender info
+    sender = await event.get_sender()
+    if not isinstance(sender, User):
+        return
+    
+    # Skip self and bots
+    if sender.is_self:
+        return
+    
+    is_bot = getattr(sender, 'bot', False)
+    if is_bot:
+        return
+
+    # Get message text
+    text = (message.text or "").strip()
+    if not text:
+        return
+    
+    sender_name = sender.first_name or sender.last_name or str(sender.id)
+    log.info("← [%s] %s", sender_name, text[:120])
+
+    _push_history(chat_id, "user", text)
+
+    try:
+        async with client.action(chat_id, "typing"):
+            reply = await mistral_chat(_build_messages(chat_id))
+    except Exception as e:
+        log.exception("Mistral error: %s", e)
+        return
+
+    _push_history(chat_id, "assistant", reply)
+    await event.reply(reply)
+    log.info("→ [%s] %s", sender_name, reply[:120])
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 async def main() -> None:
@@ -108,60 +158,8 @@ async def main() -> None:
     # Register event handler BEFORE starting client
     @client.on(events.NewMessage)
     async def handler(event):
-        # Get the message
-        message = event.message
-        
-        # Skip outgoing messages
-        if message.out:
-            log.debug("Skipped: outgoing message")
-            return
-        
-        # Log that we received something
-        log.info("📨 Received message | chat_id=%s | is_private=%s", event.chat_id, event.is_private)
-        
-        # Only reply to private chats
-        if not event.is_private:
-            log.debug("Skipped: not private chat")
-            return
-        
-        # Get sender info
-        sender = await event.get_sender()
-        if not isinstance(sender, User):
-            log.debug("Skipped: sender is not a User (type=%s)", type(sender).__name__)
-            return
-        
-        # Skip self and bots
-        if sender.is_self:
-            log.debug("Skipped: message from self")
-            return
-        
-        is_bot = getattr(sender, 'bot', False)
-        if is_bot:
-            log.debug("Skipped: message from bot")
-            return
-
-        # Get message text
-        text = (message.text or "").strip()
-        if not text:
-            log.debug("Skipped: empty message")
-            return
-        
-        chat_id = event.chat_id
-        sender_name = sender.first_name or sender.last_name or str(sender.id)
-        log.info("← [%s] %s", sender_name, text[:120])
-
-        _push_history(chat_id, "user", text)
-
-        try:
-            async with client.action(chat_id, "typing"):
-                reply = await mistral_chat(_build_messages(chat_id))
-        except Exception as e:
-            log.exception("Mistral error: %s", e)
-            return
-
-        _push_history(chat_id, "assistant", reply)
-        await event.reply(reply)
-        log.info("→ [%s] %s", sender_name, reply[:120])
+        log.info("📨 New message event | chat_id=%s", event.chat_id)
+        await process_message(client, event, event.message)
 
     # Now start the client
     await client.start()
@@ -171,7 +169,39 @@ async def main() -> None:
     print(f"\n✅ Logged in as {me.first_name} (@{me.username}). Auto-reply is ON.\n"
           f"Press Ctrl+C to stop.\n")
 
-    log.info("Waiting for messages...")
+    # Process unread messages on startup
+    log.info("Checking for unread messages...")
+    try:
+        # Get dialogs (chats list)
+        async for dialog in client.iter_dialogs(limit=50):
+            if dialog.unread_count > 0:
+                # Only process private chats (users), not groups/channels
+                if dialog.is_user:
+                    log.info("📬 Found %d unread message(s) from %s", dialog.unread_count, dialog.name)
+                    
+                    # Get unread messages
+                    async for message in client.iter_messages(dialog.entity, limit=dialog.unread_count):
+                        if not message.out and message.text:
+                            # Create a fake event-like object
+                            class FakeEvent:
+                                def __init__(self, chat_id, is_private, message_obj):
+                                    self.chat_id = chat_id
+                                    self.is_private = is_private
+                                    self.message = message_obj
+                                    self._message = message_obj
+                                
+                                async def reply(self, text):
+                                    await client.send_message(self.chat_id, text)
+                            
+                            event = FakeEvent(dialog.id, True, message)
+                            await process_message(client, event, message)
+                    
+                    # Mark as read
+                    await client.send_read_acknowledge(dialog.entity)
+    except Exception as e:
+        log.warning("Could not process unread messages: %s", e)
+
+    log.info("Waiting for new messages...")
     await client.run_until_disconnected()
 
 
