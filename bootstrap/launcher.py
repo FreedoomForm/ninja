@@ -8,11 +8,12 @@ A tiny bootstrapper.  On first run it:
     3. Enables `site` + bootstraps `pip`
     4. Downloads main.py + requirements.txt from this GitHub repo
     5. `pip install -r requirements.txt`
-    6. Launches main.py (Native Windows GUI via Win32 API)
+    6. Launches main.py (Native Windows GUI - NO CONSOLE)
 
 On every later run it just launches main.py with the local Python.
 """
 
+import ctypes
 import io
 import os
 import shutil
@@ -23,7 +24,20 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-# --------------------------------------------------------------------------- config
+# ---------------------------------------------------------------------------
+# HIDE CONSOLE IMMEDIATELY
+# ---------------------------------------------------------------------------
+user32 = ctypes.windll.user32
+kernel32 = ctypes.windll.kernel32
+
+# Hide console window
+console_hwnd = kernel32.GetConsoleWindow()
+if console_hwnd:
+    user32.ShowWindow(console_hwnd, 0)  # SW_HIDE = 0
+
+# ---------------------------------------------------------------------------
+# config
+# ---------------------------------------------------------------------------
 APP_NAME = "Ninja"
 PY_VERSION = "3.11.9"
 PY_EMBED_URL = f"https://www.python.org/ftp/python/{PY_VERSION}/python-{PY_VERSION}-embed-amd64.zip"
@@ -36,17 +50,25 @@ RAW_BASE = os.environ.get(
 )
 FILES_TO_FETCH = ["main.py", "requirements.txt"]
 
-# --------------------------------------------------------------------------- paths
+# ---------------------------------------------------------------------------
+# paths
+# ---------------------------------------------------------------------------
 APPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
 ROOT = APPDATA / APP_NAME
 PY_DIR = ROOT / "python"
 APP_DIR = ROOT / "app"
 PY_EXE = PY_DIR / "python.exe"
 MARK = ROOT / ".installed"
+LOG_FILE = ROOT / "launcher.log"
 
 
 def log(msg: str) -> None:
-    print(f"[ninja] {msg}", flush=True)
+    """Log to file instead of console"""
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%H:%M:%S')} | {msg}\n")
+    except:
+        pass
 
 
 def download(url: str, dest: Path) -> None:
@@ -63,7 +85,7 @@ def download_bytes(url: str) -> bytes:
 
 
 def install_python() -> None:
-    log("Installing embedded Python…")
+    log("Installing embedded Python...")
     PY_DIR.mkdir(parents=True, exist_ok=True)
     
     # Download and extract embedded Python
@@ -80,13 +102,18 @@ def install_python() -> None:
     # Bootstrap pip
     getpip = ROOT / "get-pip.py"
     download(GETPIP_URL, getpip)
-    log("Bootstrapping pip…")
-    subprocess.check_call([str(PY_EXE), str(getpip)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    log("Bootstrapping pip...")
+    subprocess.check_call(
+        [str(PY_EXE), str(getpip)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NO_WINDOW
+    )
     getpip.unlink(missing_ok=True)
 
 
 def fetch_app() -> None:
-    log("Fetching app sources…")
+    log("Fetching app sources...")
     APP_DIR.mkdir(parents=True, exist_ok=True)
     # Add timestamp to bypass GitHub CDN cache
     cache_buster = int(time.time())
@@ -95,7 +122,7 @@ def fetch_app() -> None:
 
 
 def pip_install() -> None:
-    log("Installing Python dependencies…")
+    log("Installing Python dependencies...")
     subprocess.check_call(
         [
             str(PY_EXE),
@@ -108,6 +135,7 @@ def pip_install() -> None:
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NO_WINDOW
     )
 
 
@@ -127,34 +155,36 @@ def update_app_quietly() -> None:
         # Always run pip install to ensure new dependencies are installed
         pip_install()
     except Exception as e:
-        log(f"(could not refresh sources: {e}) — using local copy")
+        log(f"Could not refresh sources: {e}")
 
 
 def run_app() -> int:
     main_py = APP_DIR / "main.py"
     log(f"Launching {main_py}")
-    result = subprocess.call([str(PY_EXE), str(main_py)])
     
-    # If error, pause to show message
-    if result != 0:
-        input("\nPress Enter to exit…")
+    # Run with CREATE_NO_WINDOW to ensure no console appears
+    result = subprocess.call(
+        [str(PY_EXE), str(main_py)],
+        creationflags=subprocess.CREATE_NO_WINDOW
+    )
     
     return result
 
 
 def main() -> int:
-    print("=" * 60)
-    print(" Ninja Telegram Auto-Reply ")
-    print("=" * 60)
+    log("=" * 50)
+    log("Ninja Launcher Starting")
+    log("=" * 50)
+    
     if not MARK.exists() or not PY_EXE.exists():
         try:
             first_run()
         except Exception as e:
             log(f"FATAL: install failed: {e}")
-            input("Press Enter to exit…")
             return 1
     else:
         update_app_quietly()
+    
     return run_app()
 
 

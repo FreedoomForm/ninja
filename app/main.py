@@ -3,6 +3,7 @@ Ninja Auto-Reply - Native Windows Application
 ----------------------------------------------
 Telegram auto-reply bot with Mistral AI and Native Windows GUI
 Uses Win32 API via ctypes (no external GUI dependencies needed)
+NO CONSOLE - Pure GUI application
 """
 
 import asyncio
@@ -22,6 +23,17 @@ from telethon import TelegramClient, events
 from telethon.tl.types import User
 
 # ---------------------------------------------------------------------------
+# Hide Console Window Immediately
+# ---------------------------------------------------------------------------
+user32 = ctypes.windll.user32
+kernel32 = ctypes.windll.kernel32
+
+# Get console window and hide it
+console_hwnd = kernel32.GetConsoleWindow()
+if console_hwnd:
+    user32.ShowWindow(console_hwnd, 0)  # SW_HIDE = 0
+
+# ---------------------------------------------------------------------------
 # Win32 API Constants
 # ---------------------------------------------------------------------------
 WM_CLOSE = 0x0010
@@ -29,6 +41,7 @@ WM_COMMAND = 0x0111
 WM_TIMER = 0x0113
 WM_PAINT = 0x000F
 WM_DESTROY = 0x0002
+WM_CTLCOLORSTATIC = 0x0138
 
 WS_OVERLAPPED = 0x00000000
 WS_CAPTION = 0x00C00000
@@ -43,9 +56,11 @@ BS_PUSHBUTTON = 0x00000000
 BS_DEFPUSHBUTTON = 0x00000001
 
 SS_LEFT = 0x00000000
+SS_CENTER = 0x00000001
 
 LBS_NOTIFY = 0x00000001
 LBS_NOINTEGRALHEIGHT = 0x01000000
+LBS_HASSTRINGS = 0x0040
 
 ES_MULTILINE = 0x0004
 ES_READONLY = 0x0800
@@ -55,23 +70,26 @@ CW_USEDEFAULT = -2147483648
 
 IDC_ARROW = 32512
 COLOR_BTNFACE = 15
+COLOR_WINDOW = 5
 
 SW_SHOW = 5
 SW_SHOWDEFAULT = 10
+SW_HIDE = 0
 
 MB_ICONINFORMATION = 0x40
+MB_ICONERROR = 0x10
 MB_YESNO = 0x04
+MB_OK = 0x00
 IDYES = 6
+
+# Colors
+RGB_GREEN = 0x2E7D32  # Dark green
+RGB_RED = 0xC62828    # Dark red
+RGB_DARK = 0x1A1A2E   # Dark background
+RGB_GRAY = 0x374151   # Gray
 
 # Timer ID
 TIMER_ID = 1
-
-# ---------------------------------------------------------------------------
-# Win32 API Functions
-# ---------------------------------------------------------------------------
-user32 = ctypes.windll.user32
-kernel32 = ctypes.windll.kernel32
-gdi32 = ctypes.windll.gdi32
 
 WNDPROC = ctypes.CFUNCTYPE(
     ctypes.c_int,
@@ -102,8 +120,16 @@ HISTORY_LIMIT = 12
 _history: dict[int, list[dict]] = {}
 message_logs: list[dict] = []
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s", datefmt="%H:%M:%S")
-log = logging.getLogger("ninja")
+# File logging for debugging
+LOG_FILE = DATA_DIR / "debug.log"
+
+
+def file_log(msg: str) -> None:
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{datetime.now().strftime('%H:%M:%S')} | {msg}\n")
+    except:
+        pass
 
 
 def load_config() -> dict:
@@ -175,6 +201,7 @@ def add_log(message: str, sender: str = "System", direction: str = "system") -> 
     }
     message_logs.append(entry)
     save_logs()
+    file_log(f"[{direction}] {sender}: {message}")
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +220,7 @@ class TelegramBot:
     async def reply_to_message(self, chat_id: int, sender: User, text: str) -> None:
         sender_name = sender.first_name or sender.last_name or str(sender.id)
         add_log(text, sender_name, "incoming")
-        print(f"[DEBUG] Incoming from {sender_name}: {text[:50]}...")
+        file_log(f"Incoming from {sender_name}: {text[:50]}...")
         
         push_history(chat_id, "user", text)
         
@@ -205,10 +232,10 @@ class TelegramBot:
                     self.config["mistral_key"],
                     self.config["mistral_model"]
                 )
-            print(f"[DEBUG] AI Response: {reply[:50]}...")
+            file_log(f"AI Response: {reply[:50]}...")
         except Exception as e:
             add_log(f"Mistral Error: {e}", "System", "error")
-            print(f"[ERROR] Mistral: {e}")
+            file_log(f"ERROR Mistral: {e}")
             return
         
         try:
@@ -217,10 +244,10 @@ class TelegramBot:
             await self.client.send_message(chat_id, reply)
             self.message_count += 1
             add_log(reply, sender_name, "outgoing")
-            print(f"[DEBUG] Message sent to {sender_name}!")
+            file_log(f"Message sent to {sender_name}!")
         except Exception as e:
             add_log(f"Send Error: {e}", "System", "error")
-            print(f"[ERROR] Send: {e}")
+            file_log(f"ERROR Send: {e}")
 
     async def run_bot(self):
         try:
@@ -302,10 +329,13 @@ class TelegramBot:
         except Exception as e:
             add_log(f"Error: {e}", "System", "error")
             self.running = False
+            file_log(f"Bot error: {e}")
 
     def start(self):
         if self.running:
             return
+        
+        add_log("Starting bot...", "System", "system")
         
         def run_loop():
             self.loop = asyncio.new_event_loop()
@@ -344,6 +374,11 @@ class NativeWindow:
         self.hwnd_user_label = None
         self.hwnd_msg_label = None
         self.running = True
+        self.last_log_count = 0
+        
+        # Load logs
+        global message_logs
+        message_logs = load_logs()
         
         # Register window class
         self.wndclass = wintypes.WNDCLASSW()
@@ -351,13 +386,9 @@ class NativeWindow:
         self.wndclass.lpfnWndProc = WNDPROC(self.wnd_proc)
         self.wndclass.hInstance = kernel32.GetModuleHandleW(None)
         self.wndclass.hCursor = user32.LoadCursorW(None, IDC_ARROW)
-        self.wndclass.hbrBackground = (gdi32.GetStockObject(4),)  # LTGRAY_BRUSH
+        self.wndclass.hbrBackground = 15  # COLOR_BTNFACE
         
         user32.RegisterClassW(ctypes.byref(self.wndclass))
-        
-        # Load logs
-        global message_logs
-        message_logs = load_logs()
     
     def wnd_proc(self, hwnd, msg, wparam, lparam):
         """Window procedure - handles all window events"""
@@ -383,68 +414,92 @@ class NativeWindow:
         """Create the main window and all controls"""
         hinst = kernel32.GetModuleHandleW(None)
         
-        # Main window
+        # Main window - larger and centered
+        width = 520
+        height = 480
+        screen_w = user32.GetSystemMetrics(0)
+        screen_h = user32.GetSystemMetrics(1)
+        x = (screen_w - width) // 2
+        y = (screen_h - height) // 2
+        
         self.hwnd = user32.CreateWindowExW(
-            0, "NinjaBotClass", "Ninja Bot - Telegram Auto-Reply",
+            0, "NinjaBotClass", "🥷 Ninja Bot",
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE,
-            CW_USEDEFAULT, CW_USEDEFAULT, 500, 450,
+            x, y, width, height,
             None, None, hinst, None
+        )
+        
+        # Title label
+        user32.CreateWindowExW(
+            0, "STATIC", "Telegram Auto-Reply Bot",
+            WS_CHILD | WS_VISIBLE | SS_CENTER,
+            20, 15, 460, 30,
+            self.hwnd, None, hinst, None
+        )
+        
+        # Separator line effect (just a label)
+        user32.CreateWindowExW(
+            0, "STATIC", "─" * 60,
+            WS_CHILD | WS_VISIBLE | SS_CENTER,
+            20, 40, 460, 20,
+            self.hwnd, None, hinst, None
         )
         
         # Status label
         self.hwnd_status = user32.CreateWindowExW(
-            0, "STATIC", "Status: Stopped",
+            0, "STATIC", "⏹ Status: Stopped",
             WS_CHILD | WS_VISIBLE | SS_LEFT,
-            20, 20, 200, 25,
+            20, 70, 250, 25,
             self.hwnd, None, hinst, None
         )
         
         # User label
         self.hwnd_user_label = user32.CreateWindowExW(
-            0, "STATIC", "Account: -",
+            0, "STATIC", "👤 Account: -",
             WS_CHILD | WS_VISIBLE | SS_LEFT,
-            20, 50, 200, 25,
+            20, 95, 250, 25,
             self.hwnd, None, hinst, None
         )
         
         # Message count label
         self.hwnd_msg_label = user32.CreateWindowExW(
-            0, "STATIC", "Messages: 0",
+            0, "STATIC", "💬 Messages: 0",
             WS_CHILD | WS_VISIBLE | SS_LEFT,
-            20, 80, 200, 25,
+            20, 120, 250, 25,
             self.hwnd, None, hinst, None
         )
         
-        # Start button
+        # Start button (green style simulation)
         self.hwnd_start_btn = user32.CreateWindowExW(
-            0, "BUTTON", "Start Bot",
+            0, "BUTTON", "▶ Start Bot",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            250, 20, 100, 35,
+            300, 70, 180, 40,
             self.hwnd, 1, hinst, None
         )
         
         # Stop button (disabled initially)
         self.hwnd_stop_btn = user32.CreateWindowExW(
-            0, "BUTTON", "Stop Bot",
+            0, "BUTTON", "⏹ Stop Bot",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            360, 20, 100, 35,
+            300, 115, 180, 40,
             self.hwnd, 2, hinst, None
         )
         user32.EnableWindow(self.hwnd_stop_btn, False)
         
-        # Log listbox
+        # Log label
         user32.CreateWindowExW(
-            0, "STATIC", "Activity Log:",
+            0, "STATIC", "📋 Activity Log:",
             WS_CHILD | WS_VISIBLE | SS_LEFT,
-            20, 120, 200, 25,
+            20, 160, 200, 25,
             self.hwnd, None, hinst, None
         )
         
+        # Log listbox
         self.hwnd_log_list = user32.CreateWindowExW(
             0x200,  # WS_EX_CLIENTEDGE
             "LISTBOX", "",
-            WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_BORDER,
-            20, 145, 440, 250,
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | LBS_HASSTRINGS | WS_BORDER,
+            20, 185, 460, 230,
             self.hwnd, None, hinst, None
         )
         
@@ -455,7 +510,6 @@ class NativeWindow:
     
     def on_start(self):
         """Handle start button click"""
-        add_log("Starting bot...", "System", "system")
         self.bot.start()
     
     def on_stop(self):
@@ -469,33 +523,32 @@ class NativeWindow:
         
         # Update status
         if self.bot.running:
-            status = "Status: Running"
-            user32.SetWindowTextW(self.hwnd_status, status)
+            user32.SetWindowTextW(self.hwnd_status, "✅ Status: Running")
             user32.EnableWindow(self.hwnd_start_btn, False)
             user32.EnableWindow(self.hwnd_stop_btn, True)
         else:
-            status = "Status: Stopped"
-            user32.SetWindowTextW(self.hwnd_status, status)
+            user32.SetWindowTextW(self.hwnd_status, "⏹ Status: Stopped")
             user32.EnableWindow(self.hwnd_start_btn, True)
             user32.EnableWindow(self.hwnd_stop_btn, False)
         
         # Update user
-        user = f"Account: {self.bot.username}" if self.bot.username else "Account: -"
+        user = f"👤 Account: {self.bot.username}" if self.bot.username else "👤 Account: -"
         user32.SetWindowTextW(self.hwnd_user_label, user)
         
         # Update message count
-        user32.SetWindowTextW(self.hwnd_msg_label, f"Messages: {self.bot.message_count}")
+        user32.SetWindowTextW(self.hwnd_msg_label, f"💬 Messages: {self.bot.message_count}")
         
-        # Update log list
-        # Only add new logs
-        current_count = user32.SendMessageW(self.hwnd_log_list, 0x018B, 0, 0)  # LB_GETCOUNT
+        # Update log list - only add new logs
+        current_count = self.last_log_count
         new_logs = message_logs[current_count:]
         for log_entry in new_logs:
+            # Format: [TIME] SENDER: MESSAGE
             text = f"[{log_entry['timestamp']}] {log_entry['sender']}: {log_entry['message']}"
             user32.SendMessageW(self.hwnd_log_list, 0x0180, 0, text)  # LB_ADDSTRING
         
-        # Scroll to bottom if new logs added
         if new_logs:
+            self.last_log_count = len(message_logs)
+            # Scroll to bottom
             count = user32.SendMessageW(self.hwnd_log_list, 0x018B, 0, 0)  # LB_GETCOUNT
             user32.SendMessageW(self.hwnd_log_list, 0x197, count - 1, 0)  # LB_SETCURSEL
     
@@ -515,21 +568,21 @@ class NativeWindow:
 # Main Entry Point
 # ---------------------------------------------------------------------------
 def main():
-    print("=" * 50)
-    print(" Ninja Bot - Native Windows Application ")
-    print("=" * 50)
+    file_log("=" * 50)
+    file_log("Ninja Bot Starting (Native Windows GUI)")
+    file_log("=" * 50)
     
     bot = TelegramBot()
     window = NativeWindow(bot)
     
-    print("Starting native Windows GUI...")
+    file_log("Creating native Windows GUI...")
     window.run()
     
     # Cleanup
     if bot.running:
         bot.stop()
     
-    print("Application closed.")
+    file_log("Application closed.")
     return 0
 
 

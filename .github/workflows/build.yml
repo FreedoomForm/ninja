@@ -27,7 +27,7 @@ jobs:
 
       - name: Build ninja.exe
         run: |
-          pyinstaller --onefile --console --name ninja --distpath dist bootstrap/launcher.py
+          pyinstaller --onefile --noconsole --name ninja --distpath dist bootstrap/launcher.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
