@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';">
+  <title>🥷 Ninja Bot</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app">
+    <!-- Header -->
+    <header class="header">
+      <div class="header-left">
+        <div class="logo">
+          <span class="logo-icon">🥷</span>
+          <div class="logo-text">
+            <h1>Ninja Bot</h1>
+            <p>Telegram Auto-Reply</p>
+          </div>
+        </div>
+      </div>
+      <div class="header-right">
+        <div class="connection-status" id="connectionStatus">
+          <span class="status-dot disconnected"></span>
+          <span>Disconnected</span>
+        </div>
+        <div class="bot-status" id="botStatus">
+          <span class="status-badge offline">Offline</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Stats -->
+    <div class="stats">
+      <div class="stat-card">
+        <div class="stat-icon status-icon">📊</div>
+        <div class="stat-content">
+          <div class="stat-value" id="statStatus">Stopped</div>
+          <div class="stat-label">Status</div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon">💬</div>
+        <div class="stat-content">
+          <div class="stat-value" id="statMessages">0</div>
+          <div class="stat-label">Messages</div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon">👤</div>
+        <div class="stat-content">
+          <div class="stat-value" id="statUser">-</div>
+          <div class="stat-label">Account</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="tabs">
+      <button class="tab active" data-tab="control">🎮 Control</button>
+      <button class="tab" data-tab="settings">⚙️ Settings</button>
+      <button class="tab" data-tab="logs">📋 Logs</button>
+    </div>
+
+    <!-- Tab Content -->
+    <div class="tab-contents">
+      <!-- Control Tab -->
+      <div class="tab-content active" id="tab-control">
+        <div class="control-section">
+          <div class="control-buttons">
+            <button class="btn btn-primary" id="startBtn">
+              <span class="btn-icon">▶️</span>
+              Start Bot
+            </button>
+            <button class="btn btn-danger" id="stopBtn" disabled>
+              <span class="btn-icon">⏹️</span>
+              Stop Bot
+            </button>
+            <button class="btn btn-secondary" id="refreshBtn">
+              <span class="btn-icon">🔄</span>
+              Refresh
+            </button>
+          </div>
+          
+          <div class="backend-status" id="backendStatus">
+            <p>⚠️ Python backend is not running. Click "Start Backend" to launch it.</p>
+            <button class="btn btn-warning" id="startBackendBtn">🚀 Start Backend</button>
+          </div>
+        </div>
+
+        <div class="logs-section">
+          <h3>Recent Activity</h3>
+          <div class="logs-container" id="controlLogs">
+            <div class="empty-state">
+              <span class="empty-icon">💬</span>
+              <p>No messages yet</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Settings Tab -->
+      <div class="tab-content" id="tab-settings">
+        <div class="settings-form">
+          <div class="form-row">
+            <div class="form-group">
+              <label for="apiId">Telegram API ID</label>
+              <input type="text" id="apiId" placeholder="12345678">
+              <small>Get from my.telegram.org</small>
+            </div>
+            <div class="form-group">
+              <label for="apiHash">Telegram API Hash</label>
+              <input type="password" id="apiHash" placeholder="Enter API hash">
+              <small>Get from my.telegram.org</small>
+            </div>
+          </div>
+          
+          <div class="form-row">
+            <div class="form-group">
+              <label for="mistralKey">Mistral API Key</label>
+              <input type="password" id="mistralKey" placeholder="Enter Mistral API key">
+              <small>Get from console.mistral.ai</small>
+            </div>
+            <div class="form-group">
+              <label for="mistralModel">Mistral Model</label>
+              <input type="text" id="mistralModel" placeholder="mistral-medium-latest">
+              <small>mistral-medium-latest, mistral-small-latest</small>
+            </div>
+          </div>
+          
+          <div class="form-group full-width">
+            <label for="systemPrompt">System Prompt</label>
+            <textarea id="systemPrompt" rows="4" placeholder="Instructions for the AI assistant..."></textarea>
+          </div>
+          
+          <button class="btn btn-primary btn-large" id="saveConfigBtn">
+            <span class="btn-icon">💾</span>
+            Save Settings
+          </button>
+        </div>
+      </div>
+
+      <!-- Logs Tab -->
+      <div class="tab-content" id="tab-logs">
+        <div class="logs-header">
+          <h3>Message Logs</h3>
+          <button class="btn btn-secondary" id="clearLogsBtn">🗑️ Clear Logs</button>
+        </div>
+        <div class="logs-container" id="logsList">
+          <div class="empty-state">
+            <span class="empty-icon">📋</span>
+            <p>No logs yet</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <p>Ninja Bot v1.0 - Telegram Auto-Reply with Mistral AI</p>
+    </footer>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
