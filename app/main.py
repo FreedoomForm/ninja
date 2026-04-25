@@ -197,19 +197,46 @@ class TelegramBot:
             self.running = True
             add_log(f"Logged in as {self.username}", "System", "success")
             
-            # Process unread
-            async for dialog in self.client.iter_dialogs(limit=50):
-                if dialog.unread_count > 0 and dialog.is_user:
-                    sender = dialog.entity
-                    if not isinstance(sender, User) or sender.is_self or getattr(sender, 'bot', False):
-                        continue
-                    async for message in self.client.iter_messages(dialog.entity, limit=1):
-                        if not message.out and message.text:
-                            await self.reply_to_message(dialog.id, sender, message.text.strip())
-                            break
-                    await self.client.send_read_acknowledge(dialog.entity)
+            # Process unread messages on startup
+            add_log("Checking for unread messages...", "System", "system")
+            unread_count = 0
             
-            add_log("Bot is running! Waiting for messages...", "System", "success")
+            async for dialog in self.client.iter_dialogs(limit=100):
+                if dialog.unread_count > 0:
+                    # Check if it's a private chat (user)
+                    try:
+                        entity = dialog.entity
+                        if not isinstance(entity, User):
+                            continue
+                        if entity.is_self or getattr(entity, 'bot', False):
+                            continue
+                        
+                        sender_name = entity.first_name or entity.last_name or str(entity.id)
+                        add_log(f"Found {dialog.unread_count} unread from {sender_name}", "System", "system")
+                        
+                        # Get ALL unread messages (not just last one)
+                        async for message in self.client.iter_messages(
+                            dialog.entity, 
+                            limit=dialog.unread_count,
+                            reverse=True  # Process in order
+                        ):
+                            if not message.out and message.text:
+                                await self.reply_to_message(dialog.id, entity, message.text.strip())
+                                unread_count += 1
+                        
+                        # Mark as read
+                        await self.client.send_read_acknowledge(dialog.entity)
+                        
+                    except Exception as e:
+                        add_log(f"Error processing dialog: {e}", "System", "error")
+                        continue
+            
+            if unread_count > 0:
+                add_log(f"Processed {unread_count} unread messages", "System", "success")
+            else:
+                add_log("No unread messages", "System", "system")
+            
+            add_log("Bot is running! Waiting for new messages...", "System", "success")
             await self.client.run_until_disconnected()
             
         except Exception as e:
