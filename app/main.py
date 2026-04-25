@@ -17,6 +17,7 @@ from typing import Optional
 
 import httpx
 from flask import Flask, render_template_string, request, jsonify
+from flask_cors import CORS
 from telethon import TelegramClient, events
 from telethon.tl.types import User
 
@@ -590,6 +591,7 @@ HTML_TEMPLATE = """
 
 def create_app():
     app = Flask(__name__)
+    CORS(app)  # Allow requests from Next.js frontend
     bot = TelegramBot()
     
     # Load logs
