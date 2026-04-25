@@ -1,18 +1,22 @@
 """
-Ninja Auto-Reply with Desktop UI
---------------------------------
-Telegram auto-reply bot with Mistral AI
+Ninja Auto-Reply with Web UI
+-----------------------------
+Telegram auto-reply bot with Mistral AI and Flask Web Interface
 """
 
 import asyncio
+import json
 import logging
 import os
 import sys
 import threading
+import webbrowser
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import httpx
+from flask import Flask, render_template_string, request, jsonify
 from telethon import TelegramClient, events
 from telethon.tl.types import User
 
@@ -23,6 +27,11 @@ DATA_DIR = Path(os.environ.get("NINJA_DATA_DIR", Path.home() / ".ninja"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 SESSION_PATH = DATA_DIR / "ninja"
 CONFIG_FILE = DATA_DIR / "config.txt"
+LOGS_FILE = DATA_DIR / "logs.json"
+
+# Server config
+HOST = "127.0.0.1"
+PORT = 58765
 
 # Default values
 DEFAULT_CONFIG = {
@@ -37,17 +46,15 @@ DEFAULT_CONFIG = {
 HISTORY_LIMIT = 12
 _history: dict[int, list[dict]] = {}
 
-# Logging setup
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(message)s",
-    datefmt="%H:%M:%S"
-)
+# Message logs (in memory, saved to file)
+message_logs: list[dict] = []
+
+# Logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("ninja")
 
 
 def load_config() -> dict:
-    """Load config from file."""
     config = DEFAULT_CONFIG.copy()
     if CONFIG_FILE.exists():
         try:
@@ -62,14 +69,30 @@ def load_config() -> dict:
 
 
 def save_config(config: dict) -> None:
-    """Save config to file."""
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         for key, value in config.items():
             f.write(f"{key}={value}\n")
 
 
+def load_logs() -> list:
+    if LOGS_FILE.exists():
+        try:
+            with open(LOGS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return []
+
+
+def save_logs() -> None:
+    try:
+        with open(LOGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(message_logs[-500:], f, indent=2)  # Keep last 500
+    except Exception:
+        pass
+
+
 async def mistral_chat(messages: list[dict], api_key: str, model: str) -> str:
-    """Call Mistral API."""
     url = "https://api.mistral.ai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {"model": model, "messages": messages, "temperature": 0.7, "max_tokens": 400}
@@ -90,8 +113,20 @@ def build_messages(chat_id: int, system_prompt: str) -> list[dict]:
     return [{"role": "system", "content": system_prompt}] + _history.get(chat_id, [])
 
 
+def add_log(message: str, sender: str = "System", direction: str = "system") -> None:
+    entry = {
+        "id": datetime.now().strftime("%Y%m%d%H%M%S%f"),
+        "timestamp": datetime.now().strftime("%H:%M:%S"),
+        "sender": sender,
+        "message": message[:200],
+        "direction": direction
+    }
+    message_logs.append(entry)
+    save_logs()
+
+
 # ---------------------------------------------------------------------------
-# Telegram Bot Logic
+# Telegram Bot
 # ---------------------------------------------------------------------------
 class TelegramBot:
     def __init__(self):
@@ -102,19 +137,10 @@ class TelegramBot:
         self.thread: Optional[threading.Thread] = None
         self.username: Optional[str] = None
         self.message_count = 0
-        self.log_callback = None
-
-    def log_msg(self, message: str):
-        """Log message."""
-        if self.log_callback:
-            self.log_callback(message)
-        log.info(message)
-        print(message)
 
     async def reply_to_message(self, chat_id: int, sender: User, text: str) -> None:
-        """Send auto-reply."""
         sender_name = sender.first_name or sender.last_name or str(sender.id)
-        self.log_msg(f"← [{sender_name}] {text[:80]}...")
+        add_log(text, sender_name, "incoming")
         
         push_history(chat_id, "user", text)
         
@@ -126,16 +152,15 @@ class TelegramBot:
                     self.config["mistral_model"]
                 )
         except Exception as e:
-            self.log_msg(f"❌ Mistral error: {e}")
+            add_log(f"Error: {e}", "System", "error")
             return
         
         push_history(chat_id, "assistant", reply)
         await self.client.send_message(chat_id, reply)
         self.message_count += 1
-        self.log_msg(f"→ [{sender_name}] {reply[:80]}...")
+        add_log(reply, sender_name, "outgoing")
 
     async def run_bot(self):
-        """Main bot loop."""
         try:
             self.client = TelegramClient(
                 str(SESSION_PATH),
@@ -145,9 +170,7 @@ class TelegramBot:
 
             @self.client.on(events.NewMessage)
             async def handler(event):
-                if event.message.out:
-                    return
-                if not event.is_private:
+                if event.message.out or not event.is_private:
                     return
                 sender = await event.get_sender()
                 if not isinstance(sender, User) or sender.is_self or getattr(sender, 'bot', False):
@@ -161,11 +184,10 @@ class TelegramBot:
             
             me = await self.client.get_me()
             self.username = f"@{me.username}" if me.username else me.first_name
-            self.log_msg(f"✅ Logged in as {self.username}")
             self.running = True
+            add_log(f"Logged in as {self.username}", "System", "success")
             
-            # Process unread messages
-            self.log_msg("📧 Checking unread messages...")
+            # Process unread
             async for dialog in self.client.iter_dialogs(limit=50):
                 if dialog.unread_count > 0 and dialog.is_user:
                     sender = dialog.entity
@@ -177,15 +199,14 @@ class TelegramBot:
                             break
                     await self.client.send_read_acknowledge(dialog.entity)
             
-            self.log_msg("🟢 Bot is running! Waiting for messages...")
+            add_log("Bot is running! Waiting for messages...", "System", "success")
             await self.client.run_until_disconnected()
             
         except Exception as e:
-            self.log_msg(f"❌ Error: {e}")
+            add_log(f"Error: {e}", "System", "error")
             self.running = False
 
     def start(self):
-        """Start bot in background thread."""
         if self.running:
             return
         
@@ -201,332 +222,399 @@ class TelegramBot:
         self.thread.start()
 
     def stop(self):
-        """Stop the bot."""
         if self.client and self.loop:
             async def disconnect():
                 await self.client.disconnect()
-            
             if self.loop.is_running():
                 asyncio.run_coroutine_threadsafe(disconnect(), self.loop)
-        
         self.running = False
-        self.log_msg("🔴 Bot stopped")
+        add_log("Bot stopped", "System", "info")
 
 
 # ---------------------------------------------------------------------------
-# Try Tkinter GUI, fallback to Console
+# Flask Web App
 # ---------------------------------------------------------------------------
-def run_gui():
-    """Run with Tkinter GUI."""
-    import tkinter as tk
-    from tkinter import ttk, scrolledtext, messagebox
-    import webbrowser
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🥷 Ninja Bot</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #fff;
+        }
+        .container { max-width: 1000px; margin: 0 auto; padding: 20px; }
+        
+        /* Header */
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 20px;
+            background: rgba(255,255,255,0.05);
+            border-radius: 16px;
+            margin-bottom: 20px;
+        }
+        .header h1 { display: flex; align-items: center; gap: 10px; font-size: 24px; }
+        .header h1 span { font-size: 32px; }
+        .status-badge {
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 14px;
+        }
+        .status-online { background: #10b981; }
+        .status-offline { background: #6b7280; }
+        
+        /* Stats */
+        .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 20px; }
+        .stat-card {
+            background: rgba(255,255,255,0.05);
+            border-radius: 12px;
+            padding: 20px;
+            text-align: center;
+        }
+        .stat-card .value { font-size: 28px; font-weight: bold; color: #10b981; }
+        .stat-card .label { color: #9ca3af; font-size: 14px; margin-top: 5px; }
+        
+        /* Tabs */
+        .tabs { display: flex; gap: 5px; margin-bottom: 20px; }
+        .tab {
+            padding: 12px 24px;
+            background: rgba(255,255,255,0.05);
+            border: none;
+            color: #9ca3af;
+            cursor: pointer;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: all 0.2s;
+        }
+        .tab.active { background: #10b981; color: #fff; }
+        .tab:hover { background: rgba(255,255,255,0.1); }
+        
+        /* Content */
+        .content {
+            background: rgba(255,255,255,0.05);
+            border-radius: 16px;
+            padding: 20px;
+            min-height: 400px;
+        }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        
+        /* Buttons */
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .btn-primary { background: #10b981; color: #fff; }
+        .btn-primary:hover { background: #059669; }
+        .btn-danger { background: #ef4444; color: #fff; }
+        .btn-danger:hover { background: #dc2626; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        
+        /* Form */
+        .form-group { margin-bottom: 20px; }
+        .form-group label { display: block; margin-bottom: 8px; color: #9ca3af; font-size: 14px; }
+        .form-group input, .form-group textarea {
+            width: 100%;
+            padding: 12px;
+            background: rgba(0,0,0,0.3);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 8px;
+            color: #fff;
+            font-size: 14px;
+        }
+        .form-group input:focus, .form-group textarea:focus {
+            outline: none;
+            border-color: #10b981;
+        }
+        .form-group small { color: #6b7280; font-size: 12px; }
+        
+        /* Logs */
+        .logs { max-height: 400px; overflow-y: auto; }
+        .log-entry {
+            padding: 12px;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            display: flex;
+            gap: 12px;
+        }
+        .log-entry:last-child { border-bottom: none; }
+        .log-time { color: #6b7280; font-size: 12px; min-width: 60px; }
+        .log-sender { color: #10b981; min-width: 100px; font-weight: 500; }
+        .log-message { color: #e5e7eb; flex: 1; }
+        .log-incoming { border-left: 3px solid #3b82f6; }
+        .log-outgoing { border-left: 3px solid #10b981; }
+        .log-system { border-left: 3px solid #6b7280; }
+        .log-error { border-left: 3px solid #ef4444; }
+        .log-success { border-left: 3px solid #10b981; }
+        
+        /* Control buttons */
+        .control-buttons { display: flex; gap: 15px; margin-bottom: 20px; }
+        
+        /* Empty state */
+        .empty-state { text-align: center; padding: 60px 20px; color: #6b7280; }
+        .empty-state .icon { font-size: 48px; margin-bottom: 15px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1><span>🥷</span> Ninja Bot</h1>
+            <div id="statusBadge" class="status-badge status-offline">Offline</div>
+        </div>
+        
+        <!-- Stats -->
+        <div class="stats">
+            <div class="stat-card">
+                <div id="statStatus" class="value">Stopped</div>
+                <div class="label">Status</div>
+            </div>
+            <div class="stat-card">
+                <div id="statMessages" class="value">0</div>
+                <div class="label">Messages</div>
+            </div>
+            <div class="stat-card">
+                <div id="statUser" class="value">-</div>
+                <div class="label">Account</div>
+            </div>
+        </div>
+        
+        <!-- Tabs -->
+        <div class="tabs">
+            <button class="tab active" onclick="showTab('control')">🎮 Control</button>
+            <button class="tab" onclick="showTab('settings')">⚙️ Settings</button>
+            <button class="tab" onclick="showTab('logs')">📋 Logs</button>
+        </div>
+        
+        <!-- Content -->
+        <div class="content">
+            <!-- Control Tab -->
+            <div id="tab-control" class="tab-content active">
+                <div class="control-buttons">
+                    <button id="startBtn" class="btn btn-primary" onclick="startBot()">▶️ Start Bot</button>
+                    <button id="stopBtn" class="btn btn-danger" onclick="stopBot()" disabled>⏹️ Stop Bot</button>
+                </div>
+                <div class="logs" id="controlLogs"></div>
+            </div>
+            
+            <!-- Settings Tab -->
+            <div id="tab-settings" class="tab-content">
+                <div class="form-group">
+                    <label>Telegram API ID</label>
+                    <input type="text" id="apiId" placeholder="12345678">
+                    <small>Get from <a href="https://my.telegram.org" target="_blank" style="color:#10b981">my.telegram.org</a></small>
+                </div>
+                <div class="form-group">
+                    <label>Telegram API Hash</label>
+                    <input type="password" id="apiHash" placeholder="Enter your API hash">
+                </div>
+                <div class="form-group">
+                    <label>Mistral API Key</label>
+                    <input type="password" id="mistralKey" placeholder="Enter your Mistral API key">
+                    <small>Get from <a href="https://console.mistral.ai" target="_blank" style="color:#10b981">console.mistral.ai</a></small>
+                </div>
+                <div class="form-group">
+                    <label>Mistral Model</label>
+                    <input type="text" id="mistralModel" placeholder="mistral-small-latest">
+                </div>
+                <div class="form-group">
+                    <label>System Prompt</label>
+                    <textarea id="systemPrompt" rows="4" placeholder="Instructions for the AI..."></textarea>
+                </div>
+                <button class="btn btn-primary" onclick="saveConfig()">💾 Save Settings</button>
+            </div>
+            
+            <!-- Logs Tab -->
+            <div id="tab-logs" class="tab-content">
+                <div style="margin-bottom: 15px;">
+                    <button class="btn" onclick="clearLogs()" style="background:#374151;">Clear Logs</button>
+                </div>
+                <div class="logs" id="logsList"></div>
+            </div>
+        </div>
+    </div>
     
-    class NinjaApp:
-        def __init__(self):
-            self.root = tk.Tk()
-            self.root.title("🥷 Ninja Bot - Telegram Auto-Reply")
-            self.root.geometry("700x600")
-            self.root.minsize(600, 500)
-            
-            # Bot instance
-            self.bot = TelegramBot()
-            self.bot.log_callback = self.add_log
-            
-            # Build UI
-            self.setup_ui()
-            
-            # Load saved config
-            self.load_config_to_ui()
-            
-            # Protocol for closing
-            self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-            
-        def setup_ui(self):
-            """Create the UI elements."""
-            # Main container
-            main_frame = ttk.Frame(self.root, padding="10")
-            main_frame.pack(fill=tk.BOTH, expand=True)
-            
-            # ===== TOP: Status Bar =====
-            status_frame = ttk.LabelFrame(main_frame, text="Status", padding="10")
-            status_frame.pack(fill=tk.X, pady=(0, 10))
-            
-            # Status indicator
-            self.status_var = tk.StringVar(value="⚫ Stopped")
-            self.status_label = ttk.Label(status_frame, textvariable=self.status_var, font=('Segoe UI', 11, 'bold'))
-            self.status_label.pack(side=tk.LEFT)
-            
-            # Username
-            self.user_var = tk.StringVar(value="Not logged in")
-            ttk.Label(status_frame, textvariable=self.user_var, font=('Segoe UI', 10)).pack(side=tk.LEFT, padx=(20, 0))
-            
-            # Message count
-            self.msg_count_var = tk.StringVar(value="Messages: 0")
-            ttk.Label(status_frame, textvariable=self.msg_count_var, font=('Segoe UI', 10)).pack(side=tk.RIGHT)
-            
-            # ===== MIDDLE: Notebook (Tabs) =====
-            notebook = ttk.Notebook(main_frame)
-            notebook.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
-            
-            # --- Tab 1: Control ---
-            control_frame = ttk.Frame(notebook, padding="10")
-            notebook.add(control_frame, text="🎮 Control")
-            
-            # Start/Stop buttons
-            btn_frame = ttk.Frame(control_frame)
-            btn_frame.pack(fill=tk.X, pady=(0, 20))
-            
-            self.start_btn = ttk.Button(btn_frame, text="▶️ Start Bot", command=self.start_bot, width=15)
-            self.start_btn.pack(side=tk.LEFT, padx=(0, 10))
-            
-            self.stop_btn = ttk.Button(btn_frame, text="⏹️ Stop Bot", command=self.stop_bot, width=15, state=tk.DISABLED)
-            self.stop_btn.pack(side=tk.LEFT)
-            
-            # Logs
-            ttk.Label(control_frame, text="📋 Activity Log:", font=('Segoe UI', 10, 'bold')).pack(anchor=tk.W)
-            
-            self.log_text = scrolledtext.ScrolledText(control_frame, height=15, font=('Consolas', 9), state=tk.DISABLED)
-            self.log_text.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
-            
-            # Clear log button
-            ttk.Button(control_frame, text="Clear Log", command=self.clear_log).pack(anchor=tk.W, pady=(5, 0))
-            
-            # --- Tab 2: Settings ---
-            settings_frame = ttk.Frame(notebook, padding="10")
-            notebook.add(settings_frame, text="⚙️ Settings")
-            
-            # API ID
-            ttk.Label(settings_frame, text="Telegram API ID:", font=('Segoe UI', 10)).pack(anchor=tk.W, pady=(0, 5))
-            self.api_id_entry = ttk.Entry(settings_frame, width=50)
-            self.api_id_entry.pack(fill=tk.X, pady=(0, 10))
-            ttk.Label(settings_frame, text="Get from my.telegram.org", font=('Segoe UI', 8), foreground='gray').pack(anchor=tk.W, pady=(0, 10))
-            
-            # API Hash
-            ttk.Label(settings_frame, text="Telegram API Hash:", font=('Segoe UI', 10)).pack(anchor=tk.W, pady=(0, 5))
-            self.api_hash_entry = ttk.Entry(settings_frame, width=50, show="*")
-            self.api_hash_entry.pack(fill=tk.X, pady=(0, 10))
-            ttk.Label(settings_frame, text="Get from my.telegram.org", font=('Segoe UI', 8), foreground='gray').pack(anchor=tk.W, pady=(0, 10))
-            
-            # Mistral Key
-            ttk.Label(settings_frame, text="Mistral API Key:", font=('Segoe UI', 10)).pack(anchor=tk.W, pady=(0, 5))
-            self.mistral_key_entry = ttk.Entry(settings_frame, width=50, show="*")
-            self.mistral_key_entry.pack(fill=tk.X, pady=(0, 10))
-            ttk.Label(settings_frame, text="Get from console.mistral.ai", font=('Segoe UI', 8), foreground='gray').pack(anchor=tk.W, pady=(0, 10))
-            
-            # Model
-            ttk.Label(settings_frame, text="Mistral Model:", font=('Segoe UI', 10)).pack(anchor=tk.W, pady=(0, 5))
-            self.model_entry = ttk.Entry(settings_frame, width=50)
-            self.model_entry.pack(fill=tk.X, pady=(0, 10))
-            self.model_entry.insert(0, "mistral-small-latest")
-            
-            # System Prompt
-            ttk.Label(settings_frame, text="System Prompt:", font=('Segoe UI', 10)).pack(anchor=tk.W, pady=(0, 5))
-            self.prompt_text = tk.Text(settings_frame, height=5, font=('Segoe UI', 9), wrap=tk.WORD)
-            self.prompt_text.pack(fill=tk.X, pady=(0, 10))
-            
-            # Save button
-            ttk.Button(settings_frame, text="💾 Save Settings", command=self.save_config_from_ui).pack(anchor=tk.W)
-            
-            # --- Tab 3: About ---
-            about_frame = ttk.Frame(notebook, padding="10")
-            notebook.add(about_frame, text="ℹ️ About")
-            
-            about_text = """
-🥷 Ninja Bot v1.0
-
-Telegram Auto-Reply with Mistral AI
-
-This bot automatically replies to private 
-messages in your Telegram account using AI.
-
-Features:
-• Auto-reply to private messages
-• Mistral AI integration
-• Conversation memory
-• Easy configuration
-
-Setup:
-1. Get API credentials from my.telegram.org
-2. Get Mistral API key from console.mistral.ai
-3. Configure in Settings tab
-4. Click Start Bot
-            """
-            ttk.Label(about_frame, text=about_text, font=('Segoe UI', 10), justify=tk.LEFT).pack(anchor=tk.W)
-            
-            # Link buttons
-            link_frame = ttk.Frame(about_frame)
-            link_frame.pack(anchor=tk.W, pady=(20, 0))
-            
-            ttk.Button(link_frame, text="my.telegram.org", command=lambda: webbrowser.open("https://my.telegram.org")).pack(side=tk.LEFT, padx=(0, 10))
-            ttk.Button(link_frame, text="console.mistral.ai", command=lambda: webbrowser.open("https://console.mistral.ai")).pack(side=tk.LEFT)
-            
-        def load_config_to_ui(self):
-            """Load config into UI fields."""
-            config = self.bot.config
-            self.api_id_entry.delete(0, tk.END)
-            self.api_id_entry.insert(0, config.get("api_id", ""))
-            
-            self.api_hash_entry.delete(0, tk.END)
-            self.api_hash_entry.insert(0, config.get("api_hash", ""))
-            
-            self.mistral_key_entry.delete(0, tk.END)
-            self.mistral_key_entry.insert(0, config.get("mistral_key", ""))
-            
-            self.model_entry.delete(0, tk.END)
-            self.model_entry.insert(0, config.get("mistral_model", "mistral-small-latest"))
-            
-            self.prompt_text.delete("1.0", tk.END)
-            self.prompt_text.insert("1.0", config.get("system_prompt", ""))
-            
-        def save_config_from_ui(self):
-            """Save config from UI fields."""
-            config = {
-                "api_id": self.api_id_entry.get(),
-                "api_hash": self.api_hash_entry.get(),
-                "mistral_key": self.mistral_key_entry.get(),
-                "mistral_model": self.model_entry.get(),
-                "system_prompt": self.prompt_text.get("1.0", tk.END).strip(),
-            }
-            save_config(config)
-            self.bot.config = config
-            messagebox.showinfo("Saved", "Settings saved successfully!")
-            
-        def add_log(self, message: str):
-            """Add message to log."""
-            def _add():
-                self.log_text.config(state=tk.NORMAL)
-                self.log_text.insert(tk.END, f"{message}\n")
-                self.log_text.see(tk.END)
-                self.log_text.config(state=tk.DISABLED)
-            
-            self.root.after(0, _add)
-            
-        def clear_log(self):
-            """Clear the log."""
-            self.log_text.config(state=tk.NORMAL)
-            self.log_text.delete("1.0", tk.END)
-            self.log_text.config(state=tk.DISABLED)
-            
-        def start_bot(self):
-            """Start the bot."""
-            # Validate config
-            if not self.api_id_entry.get() or not self.api_hash_entry.get():
-                messagebox.showerror("Error", "Please enter Telegram API ID and Hash in Settings")
-                return
-            
-            if not self.mistral_key_entry.get():
-                messagebox.showerror("Error", "Please enter Mistral API Key in Settings")
-                return
-            
-            # Save config first
-            self.save_config_from_ui()
-            
-            # Update UI
-            self.status_var.set("🟢 Running")
-            self.user_var.set("Connecting...")
-            self.start_btn.config(state=tk.DISABLED)
-            self.stop_btn.config(state=tk.NORMAL)
-            
-            # Start bot
-            self.add_log("🔄 Starting bot...")
-            self.bot.start()
-            
-        def stop_bot(self):
-            """Stop the bot."""
-            self.bot.stop()
-            self.status_var.set("⚫ Stopped")
-            self.start_btn.config(state=tk.NORMAL)
-            self.stop_btn.config(state=tk.DISABLED)
-            
-        def update_status(self):
-            """Periodic status update."""
-            if self.bot.running:
-                self.msg_count_var.set(f"Messages: {self.bot.message_count}")
-                if self.bot.username:
-                    self.user_var.set(self.bot.username)
-            self.root.after(1000, self.update_status)
-            
-        def on_closing(self):
-            """Handle window close."""
-            if self.bot.running:
-                self.bot.stop()
-            self.root.destroy()
-            
-        def run(self):
-            """Run the app."""
-            self.update_status()
-            self.root.mainloop()
-    
-    app = NinjaApp()
-    app.run()
+    <script>
+        function showTab(tabName) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            event.target.classList.add('active');
+            document.getElementById('tab-' + tabName).classList.add('active');
+        }
+        
+        function updateStatus() {
+            fetch('/api/status')
+                .then(r => r.json())
+                .then(data => {
+                    document.getElementById('statusBadge').textContent = data.running ? 'Online' : 'Offline';
+                    document.getElementById('statusBadge').className = 'status-badge ' + (data.running ? 'status-online' : 'status-offline');
+                    document.getElementById('statStatus').textContent = data.running ? 'Running' : 'Stopped';
+                    document.getElementById('statMessages').textContent = data.message_count;
+                    document.getElementById('statUser').textContent = data.username || '-';
+                    
+                    document.getElementById('startBtn').disabled = data.running;
+                    document.getElementById('stopBtn').disabled = !data.running;
+                });
+        }
+        
+        function loadConfig() {
+            fetch('/api/config')
+                .then(r => r.json())
+                .then(data => {
+                    document.getElementById('apiId').value = data.api_id || '';
+                    document.getElementById('apiHash').value = data.api_hash || '';
+                    document.getElementById('mistralKey').value = data.mistral_key || '';
+                    document.getElementById('mistralModel').value = data.mistral_model || '';
+                    document.getElementById('systemPrompt').value = data.system_prompt || '';
+                });
+        }
+        
+        function saveConfig() {
+            const config = {
+                api_id: document.getElementById('apiId').value,
+                api_hash: document.getElementById('apiHash').value,
+                mistral_key: document.getElementById('mistralKey').value,
+                mistral_model: document.getElementById('mistralModel').value,
+                system_prompt: document.getElementById('systemPrompt').value
+            };
+            fetch('/api/config', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(config)
+            }).then(() => alert('Settings saved!'));
+        }
+        
+        function startBot() {
+            fetch('/api/start', {method: 'POST'}).then(() => updateStatus());
+        }
+        
+        function stopBot() {
+            fetch('/api/stop', {method: 'POST'}).then(() => updateStatus());
+        }
+        
+        function loadLogs() {
+            fetch('/api/logs')
+                .then(r => r.json())
+                .then(data => {
+                    const html = data.reverse().map(log => {
+                        const cls = 'log-entry log-' + log.direction;
+                        return '<div class="' + cls + '">' +
+                            '<span class="log-time">' + log.timestamp + '</span>' +
+                            '<span class="log-sender">' + log.sender + '</span>' +
+                            '<span class="log-message">' + log.message + '</span>' +
+                            '</div>';
+                    }).join('');
+                    document.getElementById('logsList').innerHTML = html || '<div class="empty-state"><div class="icon">📋</div><p>No logs yet</p></div>';
+                    document.getElementById('controlLogs').innerHTML = html || '<div class="empty-state"><div class="icon">💬</div><p>Messages will appear here</p></div>';
+                });
+        }
+        
+        function clearLogs() {
+            fetch('/api/logs/clear', {method: 'POST'}).then(() => loadLogs());
+        }
+        
+        // Initialize
+        loadConfig();
+        updateStatus();
+        loadLogs();
+        setInterval(() => { updateStatus(); loadLogs(); }, 3000);
+    </script>
+</body>
+</html>
+"""
 
 
-def run_console():
-    """Run in console mode."""
-    print("\n" + "=" * 50)
-    print(" 🥷 NINJA BOT - Console Mode")
-    print("=" * 50)
-    print("\nTkinter not available. Running in console mode.\n")
-    
+def create_app():
+    app = Flask(__name__)
     bot = TelegramBot()
-    config = bot.config
     
-    # Show current config
-    print("Current Configuration:")
-    print(f"  API ID: {config['api_id'][:8]}...")
-    print(f"  Mistral Model: {config['mistral_model']}")
-    print()
+    # Load logs
+    global message_logs
+    message_logs = load_logs()
+
+    @app.route('/')
+    def index():
+        return render_template_string(HTML_TEMPLATE)
+
+    @app.route('/api/status')
+    def api_status():
+        return jsonify({
+            "running": bot.running,
+            "username": bot.username,
+            "message_count": bot.message_count
+        })
+
+    @app.route('/api/config', methods=['GET'])
+    def get_config():
+        config = bot.config
+        return jsonify({
+            "api_id": config.get("api_id", ""),
+            "api_hash": config.get("api_hash", ""),
+            "mistral_key": config.get("mistral_key", ""),
+            "mistral_model": config.get("mistral_model", ""),
+            "system_prompt": config.get("system_prompt", "")
+        })
+
+    @app.route('/api/config', methods=['POST'])
+    def set_config():
+        data = request.json
+        bot.config.update(data)
+        save_config(bot.config)
+        return jsonify({"success": True})
+
+    @app.route('/api/start', methods=['POST'])
+    def start():
+        bot.start()
+        return jsonify({"success": True})
+
+    @app.route('/api/stop', methods=['POST'])
+    def stop():
+        bot.stop()
+        return jsonify({"success": True})
+
+    @app.route('/api/logs')
+    def get_logs():
+        return jsonify(message_logs)
+
+    @app.route('/api/logs/clear', methods=['POST'])
+    def clear_logs():
+        global message_logs
+        message_logs = []
+        save_logs()
+        return jsonify({"success": True})
+
+    return app, bot
+
+
+def run_app():
+    app, bot = create_app()
     
-    print("Commands:")
-    print("  start  - Start the bot")
-    print("  stop   - Stop the bot")
-    print("  status - Show status")
-    print("  quit   - Exit")
-    print()
+    # Open browser
+    url = f"http://{HOST}:{PORT}"
+    print(f"\n{'='*50}")
+    print(f" 🥷 NINJA BOT - Web UI")
+    print(f"{'='*50}")
+    print(f"\n Opening browser: {url}")
+    print(f" If browser doesn't open, go to: {url}\n")
     
-    def input_loop():
-        while True:
-            try:
-                cmd = input("> ").strip().lower()
-                if cmd == "start":
-                    if not bot.running:
-                        print("Starting bot...")
-                        bot.start()
-                    else:
-                        print("Bot is already running")
-                elif cmd == "stop":
-                    bot.stop()
-                elif cmd == "status":
-                    print(f"Running: {bot.running}")
-                    print(f"User: {bot.username or 'Not logged in'}")
-                    print(f"Messages: {bot.message_count}")
-                elif cmd == "quit":
-                    if bot.running:
-                        bot.stop()
-                    print("Bye!")
-                    sys.exit(0)
-                else:
-                    print("Unknown command. Use: start, stop, status, quit")
-            except EOFError:
-                break
-            except KeyboardInterrupt:
-                print("\nBye!")
-                sys.exit(0)
+    webbrowser.open(url)
     
-    # Start input loop in main thread
-    input_loop()
+    # Start Flask
+    app.run(host=HOST, port=PORT, debug=False, use_reloader=False)
 
 
 if __name__ == "__main__":
-    try:
-        # Try to import tkinter
-        import tkinter
-        run_gui()
-    except ImportError:
-        print("Tkinter not available, using console mode...")
-        run_console()
-    except Exception as e:
-        print(f"\nError: {e}")
-        print("Falling back to console mode...")
-        run_console()
+    run_app()
