@@ -4,7 +4,7 @@ const fs = require('fs');
 const { TelegramClient } = require('telegram');
 const { StringSession } = require('telegram/sessions');
 const { NewMessage } = require('telegram/events');
-const MistralClient = require('@mistralai/mistralai').default || require('@mistralai/mistralai').Mistral;
+const Mistral = require('@mistralai/mistralai').Mistral;
 
 let mainWindow = null;
 let telegramClient = null;
@@ -215,7 +215,7 @@ async function startBot(config) {
     });
     
     // Initialize Mistral client
-    mistralClient = new MistralClient(config.mistralKey);
+    mistralClient = new Mistral(config.mistralKey);
     
     // Connect
     await telegramClient.start({
