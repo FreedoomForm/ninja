@@ -21,6 +21,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -88,8 +89,10 @@ def install_python() -> None:
 def fetch_app() -> None:
     log("Fetching app sources…")
     APP_DIR.mkdir(parents=True, exist_ok=True)
+    # Add timestamp to bypass GitHub CDN cache
+    cache_buster = int(time.time())
     for name in FILES_TO_FETCH:
-        download(f"{RAW_BASE}/{name}", APP_DIR / name)
+        download(f"{RAW_BASE}/{name}?t={cache_buster}", APP_DIR / name)
 
 
 def pip_install() -> None:
