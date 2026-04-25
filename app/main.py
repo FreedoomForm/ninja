@@ -50,11 +50,12 @@ SYSTEM_PROMPT = (
 # Logging
 # ---------------------------------------------------------------------------
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s | %(levelname)-7s | %(message)s",
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("ninja")
+log.setLevel(logging.DEBUG)
 
 
 # ---------------------------------------------------------------------------
@@ -107,20 +108,33 @@ async def main() -> None:
     print(f"\n✅ Logged in as {me.first_name} (@{me.username}). Auto-reply is ON.\n"
           f"Press Ctrl+C to stop.\n")
 
-    @client.on(events.NewMessage(incoming=True))
+    @client.on(events.NewMessage(incoming=True, outgoing=False))
     async def handler(event):
+        # Debug: log all incoming events
+        log.debug("Received event: is_private=%s, chat_id=%s", event.is_private, event.chat_id)
+        
         # Only reply to private chats from real humans, not ourselves, not bots
         if not event.is_private:
+            log.debug("Skipped: not private chat")
             return
+        
         sender = await event.get_sender()
         if not isinstance(sender, User):
+            log.debug("Skipped: sender is not a User (type=%s)", type(sender).__name__)
             return
-        if sender.is_self or sender.bot:
+        
+        # Use getattr for robust bot check (bot attribute can be None for regular users)
+        is_bot = getattr(sender, 'bot', False) or sender.bot is True
+        if sender.is_self or is_bot:
+            log.debug("Skipped: self=%s, bot=%s", sender.is_self, is_bot)
             return
 
         text = (event.raw_text or "").strip()
         if not text:
+            log.debug("Skipped: empty message")
             return
+        
+        log.debug("Processing message from %s", sender.first_name or sender.id)
 
         chat_id = event.chat_id
         log.info("← [%s] %s", sender.first_name or sender.id, text[:120])
