@@ -184,16 +184,21 @@ async def main() -> None:
                         if not message.out and message.text:
                             # Create a fake event-like object
                             class FakeEvent:
-                                def __init__(self, chat_id, is_private, message_obj):
+                                def __init__(self, chat_id, is_private, message_obj, entity, client):
                                     self.chat_id = chat_id
                                     self.is_private = is_private
                                     self.message = message_obj
                                     self._message = message_obj
+                                    self._entity = entity
+                                    self._client = client
+                                
+                                async def get_sender(self):
+                                    return self._entity
                                 
                                 async def reply(self, text):
-                                    await client.send_message(self.chat_id, text)
+                                    await self._client.send_message(self.chat_id, text)
                             
-                            event = FakeEvent(dialog.id, True, message)
+                            event = FakeEvent(dialog.id, True, message, dialog.entity, client)
                             await process_message(client, event, message)
                     
                     # Mark as read
