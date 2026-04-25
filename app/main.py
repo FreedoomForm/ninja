@@ -38,7 +38,7 @@ DEFAULT_CONFIG = {
     "api_id": "36244324",
     "api_hash": "15657d847ab4b8ae111ade8e2cbca51f",
     "mistral_key": "bz2Mp9E67ep1QfmaHzXBSJaRVOfIkx8v",
-    "mistral_model": "mistral-small-latest",
+    "mistral_model": "mistral-medium-latest",
     "system_prompt": "You are the personal AI assistant replying on behalf of the account owner in Telegram private chats. Be friendly, concise, and natural. Reply in the same language the user wrote in.",
 }
 
@@ -141,24 +141,34 @@ class TelegramBot:
     async def reply_to_message(self, chat_id: int, sender: User, text: str) -> None:
         sender_name = sender.first_name or sender.last_name or str(sender.id)
         add_log(text, sender_name, "incoming")
+        print(f"[DEBUG] Incoming from {sender_name}: {text[:50]}...")
         
         push_history(chat_id, "user", text)
         
         try:
+            add_log("Getting AI response...", "System", "system")
             async with self.client.action(chat_id, "typing"):
                 reply = await mistral_chat(
                     build_messages(chat_id, self.config["system_prompt"]),
                     self.config["mistral_key"],
                     self.config["mistral_model"]
                 )
+            print(f"[DEBUG] AI Response: {reply[:50]}...")
         except Exception as e:
-            add_log(f"Error: {e}", "System", "error")
+            add_log(f"Mistral Error: {e}", "System", "error")
+            print(f"[ERROR] Mistral: {e}")
             return
         
-        push_history(chat_id, "assistant", reply)
-        await self.client.send_message(chat_id, reply)
-        self.message_count += 1
-        add_log(reply, sender_name, "outgoing")
+        try:
+            push_history(chat_id, "assistant", reply)
+            add_log("Sending to Telegram...", "System", "system")
+            await self.client.send_message(chat_id, reply)
+            self.message_count += 1
+            add_log(reply, sender_name, "outgoing")
+            print(f"[DEBUG] Message sent to {sender_name}!")
+        except Exception as e:
+            add_log(f"Send Error: {e}", "System", "error")
+            print(f"[ERROR] Send: {e}")
 
     async def run_bot(self):
         try:
