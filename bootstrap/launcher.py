@@ -8,12 +8,11 @@ A tiny bootstrapper.  On first run it:
     3. Enables `site` + bootstraps `pip`
     4. Downloads main.py + requirements.txt from this GitHub repo
     5. `pip install -r requirements.txt`
-    6. Launches main.py (Native Windows GUI - NO CONSOLE)
+    6. Launches main.py (Native Window via pywebview)
 
 On every later run it just launches main.py with the local Python.
 """
 
-import ctypes
 import io
 import os
 import shutil
@@ -23,17 +22,6 @@ import time
 import urllib.request
 import zipfile
 from pathlib import Path
-
-# ---------------------------------------------------------------------------
-# HIDE CONSOLE IMMEDIATELY
-# ---------------------------------------------------------------------------
-user32 = ctypes.windll.user32
-kernel32 = ctypes.windll.kernel32
-
-# Hide console window
-console_hwnd = kernel32.GetConsoleWindow()
-if console_hwnd:
-    user32.ShowWindow(console_hwnd, 0)  # SW_HIDE = 0
 
 # ---------------------------------------------------------------------------
 # config
@@ -63,7 +51,7 @@ LOG_FILE = ROOT / "launcher.log"
 
 
 def log(msg: str) -> None:
-    """Log to file instead of console"""
+    """Log to file"""
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(f"{time.strftime('%H:%M:%S')} | {msg}\n")
@@ -106,8 +94,7 @@ def install_python() -> None:
     subprocess.check_call(
         [str(PY_EXE), str(getpip)],
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=subprocess.CREATE_NO_WINDOW
+        stderr=subprocess.DEVNULL
     )
     getpip.unlink(missing_ok=True)
 
@@ -134,8 +121,7 @@ def pip_install() -> None:
             str(APP_DIR / "requirements.txt"),
         ],
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=subprocess.CREATE_NO_WINDOW
+        stderr=subprocess.DEVNULL
     )
 
 
@@ -161,14 +147,7 @@ def update_app_quietly() -> None:
 def run_app() -> int:
     main_py = APP_DIR / "main.py"
     log(f"Launching {main_py}")
-    
-    # Run with CREATE_NO_WINDOW to ensure no console appears
-    result = subprocess.call(
-        [str(PY_EXE), str(main_py)],
-        creationflags=subprocess.CREATE_NO_WINDOW
-    )
-    
-    return result
+    return subprocess.call([str(PY_EXE), str(main_py)])
 
 
 def main() -> int:

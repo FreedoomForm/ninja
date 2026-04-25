@@ -1,19 +1,17 @@
 """
 Ninja Auto-Reply - Native Windows Application
 ----------------------------------------------
-Telegram auto-reply bot with Mistral AI and Native Windows GUI
-Uses Win32 API via ctypes (no external GUI dependencies needed)
-NO CONSOLE - Pure GUI application
+Telegram auto-reply bot with Mistral AI and Native Window GUI
+Uses pywebview for a real native desktop window (no browser needed)
 """
 
 import asyncio
-import ctypes
-import ctypes.wintypes as wintypes
 import json
 import logging
 import os
 import sys
 import threading
+import webview
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -23,83 +21,6 @@ from telethon import TelegramClient, events
 from telethon.tl.types import User
 
 # ---------------------------------------------------------------------------
-# Hide Console Window Immediately
-# ---------------------------------------------------------------------------
-user32 = ctypes.windll.user32
-kernel32 = ctypes.windll.kernel32
-
-# Get console window and hide it
-console_hwnd = kernel32.GetConsoleWindow()
-if console_hwnd:
-    user32.ShowWindow(console_hwnd, 0)  # SW_HIDE = 0
-
-# ---------------------------------------------------------------------------
-# Win32 API Constants
-# ---------------------------------------------------------------------------
-WM_CLOSE = 0x0010
-WM_COMMAND = 0x0111
-WM_TIMER = 0x0113
-WM_PAINT = 0x000F
-WM_DESTROY = 0x0002
-WM_CTLCOLORSTATIC = 0x0138
-
-WS_OVERLAPPED = 0x00000000
-WS_CAPTION = 0x00C00000
-WS_SYSMENU = 0x00080000
-WS_MINIMIZEBOX = 0x00020000
-WS_VISIBLE = 0x10000000
-WS_VSCROLL = 0x00200000
-WS_BORDER = 0x00800000
-WS_CHILD = 0x40000000
-
-BS_PUSHBUTTON = 0x00000000
-BS_DEFPUSHBUTTON = 0x00000001
-
-SS_LEFT = 0x00000000
-SS_CENTER = 0x00000001
-
-LBS_NOTIFY = 0x00000001
-LBS_NOINTEGRALHEIGHT = 0x01000000
-LBS_HASSTRINGS = 0x0040
-
-ES_MULTILINE = 0x0004
-ES_READONLY = 0x0800
-ES_AUTOVSCROLL = 0x0040
-
-CW_USEDEFAULT = -2147483648
-
-IDC_ARROW = 32512
-COLOR_BTNFACE = 15
-COLOR_WINDOW = 5
-
-SW_SHOW = 5
-SW_SHOWDEFAULT = 10
-SW_HIDE = 0
-
-MB_ICONINFORMATION = 0x40
-MB_ICONERROR = 0x10
-MB_YESNO = 0x04
-MB_OK = 0x00
-IDYES = 6
-
-# Colors
-RGB_GREEN = 0x2E7D32  # Dark green
-RGB_RED = 0xC62828    # Dark red
-RGB_DARK = 0x1A1A2E   # Dark background
-RGB_GRAY = 0x374151   # Gray
-
-# Timer ID
-TIMER_ID = 1
-
-WNDPROC = ctypes.CFUNCTYPE(
-    ctypes.c_int,
-    ctypes.c_void_p,
-    ctypes.c_uint,
-    ctypes.c_void_p,
-    ctypes.c_void_p
-)
-
-# ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 DATA_DIR = Path(os.environ.get("NINJA_DATA_DIR", Path.home() / ".ninja"))
@@ -107,6 +28,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 SESSION_PATH = DATA_DIR / "ninja"
 CONFIG_FILE = DATA_DIR / "config.txt"
 LOGS_FILE = DATA_DIR / "logs.json"
+DEBUG_LOG = DATA_DIR / "debug.log"
 
 DEFAULT_CONFIG = {
     "api_id": "36244324",
@@ -120,13 +42,11 @@ HISTORY_LIMIT = 12
 _history: dict[int, list[dict]] = {}
 message_logs: list[dict] = []
 
-# File logging for debugging
-LOG_FILE = DATA_DIR / "debug.log"
 
-
-def file_log(msg: str) -> None:
+def debug(msg: str) -> None:
+    """Log to debug file"""
     try:
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
+        with open(DEBUG_LOG, "a", encoding="utf-8") as f:
             f.write(f"{datetime.now().strftime('%H:%M:%S')} | {msg}\n")
     except:
         pass
@@ -201,7 +121,7 @@ def add_log(message: str, sender: str = "System", direction: str = "system") -> 
     }
     message_logs.append(entry)
     save_logs()
-    file_log(f"[{direction}] {sender}: {message}")
+    debug(f"[{direction}] {sender}: {message}")
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +140,7 @@ class TelegramBot:
     async def reply_to_message(self, chat_id: int, sender: User, text: str) -> None:
         sender_name = sender.first_name or sender.last_name or str(sender.id)
         add_log(text, sender_name, "incoming")
-        file_log(f"Incoming from {sender_name}: {text[:50]}...")
+        debug(f"Incoming from {sender_name}: {text[:50]}...")
         
         push_history(chat_id, "user", text)
         
@@ -232,10 +152,10 @@ class TelegramBot:
                     self.config["mistral_key"],
                     self.config["mistral_model"]
                 )
-            file_log(f"AI Response: {reply[:50]}...")
+            debug(f"AI Response: {reply[:50]}...")
         except Exception as e:
             add_log(f"Mistral Error: {e}", "System", "error")
-            file_log(f"ERROR Mistral: {e}")
+            debug(f"ERROR Mistral: {e}")
             return
         
         try:
@@ -244,10 +164,10 @@ class TelegramBot:
             await self.client.send_message(chat_id, reply)
             self.message_count += 1
             add_log(reply, sender_name, "outgoing")
-            file_log(f"Message sent to {sender_name}!")
+            debug(f"Message sent to {sender_name}!")
         except Exception as e:
             add_log(f"Send Error: {e}", "System", "error")
-            file_log(f"ERROR Send: {e}")
+            debug(f"ERROR Send: {e}")
 
     async def run_bot(self):
         try:
@@ -329,7 +249,7 @@ class TelegramBot:
         except Exception as e:
             add_log(f"Error: {e}", "System", "error")
             self.running = False
-            file_log(f"Bot error: {e}")
+            debug(f"Bot error: {e}")
 
     def start(self):
         if self.running:
@@ -359,230 +279,369 @@ class TelegramBot:
 
 
 # ---------------------------------------------------------------------------
-# Native Windows GUI
+# Native Window GUI with pywebview
 # ---------------------------------------------------------------------------
-class NativeWindow:
-    """Native Windows GUI using Win32 API via ctypes"""
+class Api:
+    """API exposed to the webview window"""
     
     def __init__(self, bot: TelegramBot):
         self.bot = bot
-        self.hwnd = None
-        self.hwnd_status = None
-        self.hwnd_start_btn = None
-        self.hwnd_stop_btn = None
-        self.hwnd_log_list = None
-        self.hwnd_user_label = None
-        self.hwnd_msg_label = None
-        self.running = True
-        self.last_log_count = 0
-        
-        # Load logs
+        self.window = None
         global message_logs
         message_logs = load_logs()
-        
-        # Register window class
-        self.wndclass = wintypes.WNDCLASSW()
-        self.wndclass.lpszClassName = "NinjaBotClass"
-        self.wndclass.lpfnWndProc = WNDPROC(self.wnd_proc)
-        self.wndclass.hInstance = kernel32.GetModuleHandleW(None)
-        self.wndclass.hCursor = user32.LoadCursorW(None, IDC_ARROW)
-        self.wndclass.hbrBackground = 15  # COLOR_BTNFACE
-        
-        user32.RegisterClassW(ctypes.byref(self.wndclass))
     
-    def wnd_proc(self, hwnd, msg, wparam, lparam):
-        """Window procedure - handles all window events"""
-        if msg == WM_COMMAND:
-            cmd = wparam & 0xFFFF
-            if cmd == 1:  # Start button
-                self.on_start()
-            elif cmd == 2:  # Stop button
-                self.on_stop()
-        elif msg == WM_TIMER:
-            self.update_ui()
-        elif msg == WM_CLOSE:
-            self.running = False
-            user32.KillTimer(hwnd, TIMER_ID)
-            user32.DestroyWindow(hwnd)
-        elif msg == WM_DESTROY:
-            user32.PostQuitMessage(0)
-            return 0
-        
-        return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+    def get_status(self):
+        """Get bot status"""
+        return {
+            "running": self.bot.running,
+            "username": self.bot.username or "-",
+            "message_count": self.bot.message_count
+        }
     
-    def create_window(self):
-        """Create the main window and all controls"""
-        hinst = kernel32.GetModuleHandleW(None)
-        
-        # Main window - larger and centered
-        width = 520
-        height = 480
-        screen_w = user32.GetSystemMetrics(0)
-        screen_h = user32.GetSystemMetrics(1)
-        x = (screen_w - width) // 2
-        y = (screen_h - height) // 2
-        
-        self.hwnd = user32.CreateWindowExW(
-            0, "NinjaBotClass", "🥷 Ninja Bot",
-            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE,
-            x, y, width, height,
-            None, None, hinst, None
-        )
-        
-        # Title label
-        user32.CreateWindowExW(
-            0, "STATIC", "Telegram Auto-Reply Bot",
-            WS_CHILD | WS_VISIBLE | SS_CENTER,
-            20, 15, 460, 30,
-            self.hwnd, None, hinst, None
-        )
-        
-        # Separator line effect (just a label)
-        user32.CreateWindowExW(
-            0, "STATIC", "─" * 60,
-            WS_CHILD | WS_VISIBLE | SS_CENTER,
-            20, 40, 460, 20,
-            self.hwnd, None, hinst, None
-        )
-        
-        # Status label
-        self.hwnd_status = user32.CreateWindowExW(
-            0, "STATIC", "⏹ Status: Stopped",
-            WS_CHILD | WS_VISIBLE | SS_LEFT,
-            20, 70, 250, 25,
-            self.hwnd, None, hinst, None
-        )
-        
-        # User label
-        self.hwnd_user_label = user32.CreateWindowExW(
-            0, "STATIC", "👤 Account: -",
-            WS_CHILD | WS_VISIBLE | SS_LEFT,
-            20, 95, 250, 25,
-            self.hwnd, None, hinst, None
-        )
-        
-        # Message count label
-        self.hwnd_msg_label = user32.CreateWindowExW(
-            0, "STATIC", "💬 Messages: 0",
-            WS_CHILD | WS_VISIBLE | SS_LEFT,
-            20, 120, 250, 25,
-            self.hwnd, None, hinst, None
-        )
-        
-        # Start button (green style simulation)
-        self.hwnd_start_btn = user32.CreateWindowExW(
-            0, "BUTTON", "▶ Start Bot",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            300, 70, 180, 40,
-            self.hwnd, 1, hinst, None
-        )
-        
-        # Stop button (disabled initially)
-        self.hwnd_stop_btn = user32.CreateWindowExW(
-            0, "BUTTON", "⏹ Stop Bot",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            300, 115, 180, 40,
-            self.hwnd, 2, hinst, None
-        )
-        user32.EnableWindow(self.hwnd_stop_btn, False)
-        
-        # Log label
-        user32.CreateWindowExW(
-            0, "STATIC", "📋 Activity Log:",
-            WS_CHILD | WS_VISIBLE | SS_LEFT,
-            20, 160, 200, 25,
-            self.hwnd, None, hinst, None
-        )
-        
-        # Log listbox
-        self.hwnd_log_list = user32.CreateWindowExW(
-            0x200,  # WS_EX_CLIENTEDGE
-            "LISTBOX", "",
-            WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | LBS_HASSTRINGS | WS_BORDER,
-            20, 185, 460, 230,
-            self.hwnd, None, hinst, None
-        )
-        
-        # Set timer for UI updates
-        user32.SetTimer(self.hwnd, TIMER_ID, 1000, None)
-        
-        return self.hwnd
+    def get_logs(self):
+        """Get all logs"""
+        return message_logs[-100:]  # Last 100
     
-    def on_start(self):
-        """Handle start button click"""
+    def start_bot(self):
+        """Start the bot"""
         self.bot.start()
+        return {"success": True}
     
-    def on_stop(self):
-        """Handle stop button click"""
+    def stop_bot(self):
+        """Stop the bot"""
         self.bot.stop()
+        return {"success": True}
     
-    def update_ui(self):
-        """Update UI elements based on bot state"""
-        if not self.running:
-            return
-        
-        # Update status
-        if self.bot.running:
-            user32.SetWindowTextW(self.hwnd_status, "✅ Status: Running")
-            user32.EnableWindow(self.hwnd_start_btn, False)
-            user32.EnableWindow(self.hwnd_stop_btn, True)
-        else:
-            user32.SetWindowTextW(self.hwnd_status, "⏹ Status: Stopped")
-            user32.EnableWindow(self.hwnd_start_btn, True)
-            user32.EnableWindow(self.hwnd_stop_btn, False)
-        
-        # Update user
-        user = f"👤 Account: {self.bot.username}" if self.bot.username else "👤 Account: -"
-        user32.SetWindowTextW(self.hwnd_user_label, user)
-        
-        # Update message count
-        user32.SetWindowTextW(self.hwnd_msg_label, f"💬 Messages: {self.bot.message_count}")
-        
-        # Update log list - only add new logs
-        current_count = self.last_log_count
-        new_logs = message_logs[current_count:]
-        for log_entry in new_logs:
-            # Format: [TIME] SENDER: MESSAGE
-            text = f"[{log_entry['timestamp']}] {log_entry['sender']}: {log_entry['message']}"
-            user32.SendMessageW(self.hwnd_log_list, 0x0180, 0, text)  # LB_ADDSTRING
-        
-        if new_logs:
-            self.last_log_count = len(message_logs)
-            # Scroll to bottom
-            count = user32.SendMessageW(self.hwnd_log_list, 0x018B, 0, 0)  # LB_GETCOUNT
-            user32.SendMessageW(self.hwnd_log_list, 0x197, count - 1, 0)  # LB_SETCURSEL
+    def get_config(self):
+        """Get configuration"""
+        return {
+            "api_id": self.bot.config.get("api_id", ""),
+            "api_hash": self.bot.config.get("api_hash", ""),
+            "mistral_key": self.bot.config.get("mistral_key", ""),
+            "mistral_model": self.bot.config.get("mistral_model", ""),
+            "system_prompt": self.bot.config.get("system_prompt", "")
+        }
     
-    def run(self):
-        """Main message loop"""
-        self.create_window()
-        
-        msg = wintypes.MSG()
-        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0):
-            user32.TranslateMessage(ctypes.byref(msg))
-            user32.DispatchMessageW(ctypes.byref(msg))
-        
-        return msg.wParam
+    def save_config(self, api_id, api_hash, mistral_key, mistral_model, system_prompt):
+        """Save configuration"""
+        self.bot.config["api_id"] = api_id
+        self.bot.config["api_hash"] = api_hash
+        self.bot.config["mistral_key"] = mistral_key
+        self.bot.config["mistral_model"] = mistral_model
+        self.bot.config["system_prompt"] = system_prompt
+        save_config(self.bot.config)
+        return {"success": True}
 
 
-# ---------------------------------------------------------------------------
-# Main Entry Point
-# ---------------------------------------------------------------------------
+# HTML for the native window
+HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Ninja Bot</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #fff;
+            padding: 20px;
+        }
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 15px 20px;
+            background: rgba(255,255,255,0.05);
+            border-radius: 12px;
+            margin-bottom: 15px;
+        }
+        .header h1 { display: flex; align-items: center; gap: 10px; font-size: 20px; }
+        .header h1 span { font-size: 28px; }
+        .status-badge {
+            padding: 6px 14px;
+            border-radius: 16px;
+            font-weight: 600;
+            font-size: 13px;
+        }
+        .status-online { background: #10b981; }
+        .status-offline { background: #6b7280; }
+        
+        .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 15px; }
+        .stat-card {
+            background: rgba(255,255,255,0.05);
+            border-radius: 10px;
+            padding: 15px;
+            text-align: center;
+        }
+        .stat-card .value { font-size: 22px; font-weight: bold; color: #10b981; }
+        .stat-card .label { color: #9ca3af; font-size: 12px; margin-top: 4px; }
+        
+        .tabs { display: flex; gap: 5px; margin-bottom: 15px; }
+        .tab {
+            padding: 10px 20px;
+            background: rgba(255,255,255,0.05);
+            border: none;
+            color: #9ca3af;
+            cursor: pointer;
+            border-radius: 8px;
+            font-size: 13px;
+            transition: all 0.2s;
+        }
+        .tab.active { background: #10b981; color: #fff; }
+        .tab:hover { background: rgba(255,255,255,0.1); }
+        
+        .content {
+            background: rgba(255,255,255,0.05);
+            border-radius: 12px;
+            padding: 15px;
+            min-height: 300px;
+        }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .btn-primary { background: #10b981; color: #fff; }
+        .btn-primary:hover { background: #059669; }
+        .btn-danger { background: #ef4444; color: #fff; }
+        .btn-danger:hover { background: #dc2626; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        
+        .control-buttons { display: flex; gap: 10px; margin-bottom: 15px; }
+        
+        .form-group { margin-bottom: 15px; }
+        .form-group label { display: block; margin-bottom: 6px; color: #9ca3af; font-size: 13px; }
+        .form-group input, .form-group textarea {
+            width: 100%;
+            padding: 10px;
+            background: rgba(0,0,0,0.3);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 6px;
+            color: #fff;
+            font-size: 13px;
+        }
+        .form-group input:focus, .form-group textarea:focus {
+            outline: none;
+            border-color: #10b981;
+        }
+        .form-group small { color: #6b7280; font-size: 11px; }
+        
+        .logs { max-height: 280px; overflow-y: auto; }
+        .log-entry {
+            padding: 10px;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            display: flex;
+            gap: 10px;
+            font-size: 12px;
+        }
+        .log-entry:last-child { border-bottom: none; }
+        .log-time { color: #6b7280; min-width: 50px; }
+        .log-sender { color: #10b981; min-width: 80px; font-weight: 500; }
+        .log-message { color: #e5e7eb; flex: 1; }
+        .log-incoming { border-left: 3px solid #3b82f6; }
+        .log-outgoing { border-left: 3px solid #10b981; }
+        .log-system { border-left: 3px solid #6b7280; }
+        .log-error { border-left: 3px solid #ef4444; }
+        .log-success { border-left: 3px solid #10b981; }
+        
+        .empty-state { text-align: center; padding: 40px 20px; color: #6b7280; }
+        .empty-state .icon { font-size: 40px; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1><span>🥷</span> Ninja Bot</h1>
+        <div id="statusBadge" class="status-badge status-offline">Offline</div>
+    </div>
+    
+    <div class="stats">
+        <div class="stat-card">
+            <div id="statStatus" class="value">Stopped</div>
+            <div class="label">Status</div>
+        </div>
+        <div class="stat-card">
+            <div id="statMessages" class="value">0</div>
+            <div class="label">Messages</div>
+        </div>
+        <div class="stat-card">
+            <div id="statUser" class="value">-</div>
+            <div class="label">Account</div>
+        </div>
+    </div>
+    
+    <div class="tabs">
+        <button class="tab active" onclick="showTab('control')">🎮 Control</button>
+        <button class="tab" onclick="showTab('settings')">⚙️ Settings</button>
+        <button class="tab" onclick="showTab('logs')">📋 Logs</button>
+    </div>
+    
+    <div class="content">
+        <div id="tab-control" class="tab-content active">
+            <div class="control-buttons">
+                <button id="startBtn" class="btn btn-primary" onclick="startBot()">▶️ Start Bot</button>
+                <button id="stopBtn" class="btn btn-danger" onclick="stopBot()" disabled>⏹️ Stop Bot</button>
+            </div>
+            <div class="logs" id="controlLogs"></div>
+        </div>
+        
+        <div id="tab-settings" class="tab-content">
+            <div class="form-group">
+                <label>Telegram API ID</label>
+                <input type="text" id="apiId" placeholder="12345678">
+                <small>Get from <a href="#" style="color:#10b981">my.telegram.org</a></small>
+            </div>
+            <div class="form-group">
+                <label>Telegram API Hash</label>
+                <input type="password" id="apiHash" placeholder="Enter your API hash">
+            </div>
+            <div class="form-group">
+                <label>Mistral API Key</label>
+                <input type="password" id="mistralKey" placeholder="Enter your Mistral API key">
+                <small>Get from <a href="#" style="color:#10b981">console.mistral.ai</a></small>
+            </div>
+            <div class="form-group">
+                <label>Mistral Model</label>
+                <input type="text" id="mistralModel" placeholder="mistral-small-latest">
+            </div>
+            <div class="form-group">
+                <label>System Prompt</label>
+                <textarea id="systemPrompt" rows="3" placeholder="Instructions for the AI..."></textarea>
+            </div>
+            <button class="btn btn-primary" onclick="saveConfig()">💾 Save Settings</button>
+        </div>
+        
+        <div id="tab-logs" class="tab-content">
+            <div style="margin-bottom: 10px;">
+                <button class="btn" onclick="clearLogs()" style="background:#374151;">Clear Logs</button>
+            </div>
+            <div class="logs" id="logsList"></div>
+        </div>
+    </div>
+
+    <script>
+        function showTab(tabName) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            event.target.classList.add('active');
+            document.getElementById('tab-' + tabName).classList.add('active');
+        }
+        
+        async function updateStatus() {
+            const data = await pywebview.api.get_status();
+            document.getElementById('statusBadge').textContent = data.running ? 'Online' : 'Offline';
+            document.getElementById('statusBadge').className = 'status-badge ' + (data.running ? 'status-online' : 'status-offline');
+            document.getElementById('statStatus').textContent = data.running ? 'Running' : 'Stopped';
+            document.getElementById('statMessages').textContent = data.message_count;
+            document.getElementById('statUser').textContent = data.username || '-';
+            document.getElementById('startBtn').disabled = data.running;
+            document.getElementById('stopBtn').disabled = !data.running;
+        }
+        
+        async function loadConfig() {
+            const data = await pywebview.api.get_config();
+            document.getElementById('apiId').value = data.api_id || '';
+            document.getElementById('apiHash').value = data.api_hash || '';
+            document.getElementById('mistralKey').value = data.mistral_key || '';
+            document.getElementById('mistralModel').value = data.mistral_model || '';
+            document.getElementById('systemPrompt').value = data.system_prompt || '';
+        }
+        
+        async function saveConfig() {
+            await pywebview.api.save_config(
+                document.getElementById('apiId').value,
+                document.getElementById('apiHash').value,
+                document.getElementById('mistralKey').value,
+                document.getElementById('mistralModel').value,
+                document.getElementById('systemPrompt').value
+            );
+            alert('Settings saved!');
+        }
+        
+        async function startBot() {
+            await pywebview.api.start_bot();
+            updateStatus();
+        }
+        
+        async function stopBot() {
+            await pywebview.api.stop_bot();
+            updateStatus();
+        }
+        
+        async function loadLogs() {
+            const data = await pywebview.api.get_logs();
+            const html = data.reverse().map(log => {
+                const cls = 'log-entry log-' + log.direction;
+                return '<div class="' + cls + '">' +
+                    '<span class="log-time">' + log.timestamp + '</span>' +
+                    '<span class="log-sender">' + log.sender + '</span>' +
+                    '<span class="log-message">' + log.message + '</span>' +
+                    '</div>';
+            }).join('');
+            document.getElementById('logsList').innerHTML = html || '<div class="empty-state"><div class="icon">📋</div><p>No logs yet</p></div>';
+            document.getElementById('controlLogs').innerHTML = html || '<div class="empty-state"><div class="icon">💬</div><p>Messages will appear here</p></div>';
+        }
+        
+        async function clearLogs() {
+            // Just refresh for now
+            loadLogs();
+        }
+        
+        // Initialize
+        loadConfig();
+        updateStatus();
+        loadLogs();
+        setInterval(() => { updateStatus(); loadLogs(); }, 2000);
+    </script>
+</body>
+</html>
+"""
+
+
 def main():
-    file_log("=" * 50)
-    file_log("Ninja Bot Starting (Native Windows GUI)")
-    file_log("=" * 50)
+    debug("=" * 50)
+    debug("Ninja Bot Starting (Native Window)")
+    debug("=" * 50)
     
+    # Create bot
     bot = TelegramBot()
-    window = NativeWindow(bot)
     
-    file_log("Creating native Windows GUI...")
-    window.run()
+    # Create API
+    api = Api(bot)
+    
+    # Create native window
+    window = webview.create_window(
+        "🥷 Ninja Bot",
+        html=HTML,
+        js_api=api,
+        width=550,
+        height=600,
+        resizable=True,
+        frameless=False,
+        easy_drag=True
+    )
+    
+    api.window = window
+    
+    debug("Starting native window...")
+    
+    # Start webview (this blocks until window is closed)
+    webview.start(debug=False)
     
     # Cleanup
     if bot.running:
         bot.stop()
     
-    file_log("Application closed.")
+    debug("Application closed.")
     return 0
 
 
