@@ -1,167 +1,302 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';">
-  <title>🥷 Ninja Bot</title>
-  <link rel="stylesheet" href="styles.css">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ninja Bot</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #fff;
+            padding: 15px;
+            user-select: none;
+        }
+        
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 15px;
+            background: rgba(255,255,255,0.05);
+            border-radius: 10px;
+            margin-bottom: 12px;
+        }
+        .header h1 { display: flex; align-items: center; gap: 8px; font-size: 18px; }
+        .header h1 span { font-size: 24px; }
+        .status-badge {
+            padding: 5px 12px;
+            border-radius: 14px;
+            font-weight: 600;
+            font-size: 12px;
+        }
+        .status-online { background: #10b981; }
+        .status-offline { background: #6b7280; }
+        
+        .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
+        .stat-card {
+            background: rgba(255,255,255,0.05);
+            border-radius: 8px;
+            padding: 12px;
+            text-align: center;
+        }
+        .stat-card .value { font-size: 18px; font-weight: bold; color: #10b981; }
+        .stat-card .label { color: #9ca3af; font-size: 11px; margin-top: 3px; }
+        
+        .tabs { display: flex; gap: 4px; margin-bottom: 12px; }
+        .tab {
+            padding: 8px 16px;
+            background: rgba(255,255,255,0.05);
+            border: none;
+            color: #9ca3af;
+            cursor: pointer;
+            border-radius: 6px;
+            font-size: 12px;
+            transition: all 0.2s;
+        }
+        .tab.active { background: #10b981; color: #fff; }
+        .tab:hover { background: rgba(255,255,255,0.1); }
+        
+        .content {
+            background: rgba(255,255,255,0.05);
+            border-radius: 10px;
+            padding: 12px;
+            min-height: 350px;
+        }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .btn-primary { background: #10b981; color: #fff; }
+        .btn-primary:hover { background: #059669; }
+        .btn-danger { background: #ef4444; color: #fff; }
+        .btn-danger:hover { background: #dc2626; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        
+        .form-group { margin-bottom: 12px; }
+        .form-group label { display: block; margin-bottom: 5px; color: #9ca3af; font-size: 12px; }
+        .form-group input, .form-group textarea {
+            width: 100%;
+            padding: 8px 10px;
+            background: rgba(0,0,0,0.3);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 5px;
+            color: #fff;
+            font-size: 12px;
+        }
+        .form-group input:focus, .form-group textarea:focus {
+            outline: none;
+            border-color: #10b981;
+        }
+        .form-group small { color: #6b7280; font-size: 10px; }
+        
+        .logs { max-height: 280px; overflow-y: auto; }
+        .log-entry {
+            padding: 8px;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            display: flex;
+            gap: 8px;
+            font-size: 11px;
+        }
+        .log-entry:last-child { border-bottom: none; }
+        .log-time { color: #6b7280; min-width: 50px; }
+        .log-sender { color: #10b981; min-width: 70px; font-weight: 500; }
+        .log-message { color: #e5e7eb; flex: 1; word-break: break-word; }
+        .log-incoming { border-left: 3px solid #3b82f6; }
+        .log-outgoing { border-left: 3px solid #10b981; }
+        .log-system { border-left: 3px solid #6b7280; }
+        .log-error { border-left: 3px solid #ef4444; }
+        .log-success { border-left: 3px solid #10b981; }
+        
+        .control-buttons { display: flex; gap: 10px; margin-bottom: 12px; }
+        .empty-state { text-align: center; padding: 30px; color: #6b7280; }
+        .empty-state .icon { font-size: 32px; margin-bottom: 8px; }
+        
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: rgba(255,255,255,0.05); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 3px; }
+    </style>
 </head>
 <body>
-  <div class="app">
-    <!-- Header -->
-    <header class="header">
-      <div class="header-left">
-        <div class="logo">
-          <span class="logo-icon">🥷</span>
-          <div class="logo-text">
-            <h1>Ninja Bot</h1>
-            <p>Telegram Auto-Reply</p>
-          </div>
-        </div>
-      </div>
-      <div class="header-right">
-        <div class="connection-status" id="connectionStatus">
-          <span class="status-dot disconnected"></span>
-          <span>Disconnected</span>
-        </div>
-        <div class="bot-status" id="botStatus">
-          <span class="status-badge offline">Offline</span>
-        </div>
-      </div>
-    </header>
-
-    <!-- Stats -->
+    <div class="header">
+        <h1><span>🥷</span> Ninja Bot</h1>
+        <div id="statusBadge" class="status-badge status-offline">Offline</div>
+    </div>
+    
     <div class="stats">
-      <div class="stat-card">
-        <div class="stat-icon status-icon">📊</div>
-        <div class="stat-content">
-          <div class="stat-value" id="statStatus">Stopped</div>
-          <div class="stat-label">Status</div>
+        <div class="stat-card">
+            <div id="statStatus" class="value">Stopped</div>
+            <div class="label">Status</div>
         </div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-icon">💬</div>
-        <div class="stat-content">
-          <div class="stat-value" id="statMessages">0</div>
-          <div class="stat-label">Messages</div>
+        <div class="stat-card">
+            <div id="statMessages" class="value">0</div>
+            <div class="label">Messages</div>
         </div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-icon">👤</div>
-        <div class="stat-content">
-          <div class="stat-value" id="statUser">-</div>
-          <div class="stat-label">Account</div>
+        <div class="stat-card">
+            <div id="statUser" class="value">-</div>
+            <div class="label">Account</div>
         </div>
-      </div>
     </div>
-
-    <!-- Tabs -->
+    
     <div class="tabs">
-      <button class="tab active" data-tab="control">🎮 Control</button>
-      <button class="tab" data-tab="settings">⚙️ Settings</button>
-      <button class="tab" data-tab="logs">📋 Logs</button>
+        <button class="tab active" onclick="showTab('control')">🎮 Control</button>
+        <button class="tab" onclick="showTab('settings')">⚙️ Settings</button>
+        <button class="tab" onclick="showTab('logs')">📋 Logs</button>
+    </div>
+    
+    <div class="content">
+        <div id="tab-control" class="tab-content active">
+            <div class="control-buttons">
+                <button id="startBtn" class="btn btn-primary" onclick="startBot()">▶ Start Bot</button>
+                <button id="stopBtn" class="btn btn-danger" onclick="stopBot()" disabled>⏹ Stop Bot</button>
+            </div>
+            <div class="logs" id="controlLogs"></div>
+        </div>
+        
+        <div id="tab-settings" class="tab-content">
+            <div class="form-group">
+                <label>Telegram API ID</label>
+                <input type="text" id="apiId" placeholder="12345678">
+                <small>Get from my.telegram.org</small>
+            </div>
+            <div class="form-group">
+                <label>Telegram API Hash</label>
+                <input type="password" id="apiHash" placeholder="Enter your API hash">
+            </div>
+            <div class="form-group">
+                <label>Mistral API Key</label>
+                <input type="password" id="mistralKey" placeholder="Enter your Mistral API key">
+                <small>Get from console.mistral.ai</small>
+            </div>
+            <div class="form-group">
+                <label>Mistral Model</label>
+                <input type="text" id="mistralModel" placeholder="mistral-medium-latest">
+            </div>
+            <div class="form-group">
+                <label>System Prompt</label>
+                <textarea id="systemPrompt" rows="3" placeholder="Instructions for the AI..."></textarea>
+            </div>
+            <button class="btn btn-primary" onclick="saveConfig()">💾 Save Settings</button>
+        </div>
+        
+        <div id="tab-logs" class="tab-content">
+            <div style="margin-bottom: 10px;">
+                <button class="btn" onclick="clearLogs()" style="background:#374151;">Clear Logs</button>
+            </div>
+            <div class="logs" id="logsList"></div>
+        </div>
     </div>
 
-    <!-- Tab Content -->
-    <div class="tab-contents">
-      <!-- Control Tab -->
-      <div class="tab-content active" id="tab-control">
-        <div class="control-section">
-          <div class="control-buttons">
-            <button class="btn btn-primary" id="startBtn">
-              <span class="btn-icon">▶️</span>
-              Start Bot
-            </button>
-            <button class="btn btn-danger" id="stopBtn" disabled>
-              <span class="btn-icon">⏹️</span>
-              Stop Bot
-            </button>
-            <button class="btn btn-secondary" id="refreshBtn">
-              <span class="btn-icon">🔄</span>
-              Refresh
-            </button>
-          </div>
-          
-          <div class="backend-status" id="backendStatus">
-            <p>⚠️ Python backend is not running. Click "Start Backend" to launch it.</p>
-            <button class="btn btn-warning" id="startBackendBtn">🚀 Start Backend</button>
-          </div>
-        </div>
-
-        <div class="logs-section">
-          <h3>Recent Activity</h3>
-          <div class="logs-container" id="controlLogs">
-            <div class="empty-state">
-              <span class="empty-icon">💬</span>
-              <p>No messages yet</p>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Settings Tab -->
-      <div class="tab-content" id="tab-settings">
-        <div class="settings-form">
-          <div class="form-row">
-            <div class="form-group">
-              <label for="apiId">Telegram API ID</label>
-              <input type="text" id="apiId" placeholder="12345678">
-              <small>Get from my.telegram.org</small>
-            </div>
-            <div class="form-group">
-              <label for="apiHash">Telegram API Hash</label>
-              <input type="password" id="apiHash" placeholder="Enter API hash">
-              <small>Get from my.telegram.org</small>
-            </div>
-          </div>
-          
-          <div class="form-row">
-            <div class="form-group">
-              <label for="mistralKey">Mistral API Key</label>
-              <input type="password" id="mistralKey" placeholder="Enter Mistral API key">
-              <small>Get from console.mistral.ai</small>
-            </div>
-            <div class="form-group">
-              <label for="mistralModel">Mistral Model</label>
-              <input type="text" id="mistralModel" placeholder="mistral-medium-latest">
-              <small>mistral-medium-latest, mistral-small-latest</small>
-            </div>
-          </div>
-          
-          <div class="form-group full-width">
-            <label for="systemPrompt">System Prompt</label>
-            <textarea id="systemPrompt" rows="4" placeholder="Instructions for the AI assistant..."></textarea>
-          </div>
-          
-          <button class="btn btn-primary btn-large" id="saveConfigBtn">
-            <span class="btn-icon">💾</span>
-            Save Settings
-          </button>
-        </div>
-      </div>
-
-      <!-- Logs Tab -->
-      <div class="tab-content" id="tab-logs">
-        <div class="logs-header">
-          <h3>Message Logs</h3>
-          <button class="btn btn-secondary" id="clearLogsBtn">🗑️ Clear Logs</button>
-        </div>
-        <div class="logs-container" id="logsList">
-          <div class="empty-state">
-            <span class="empty-icon">📋</span>
-            <p>No logs yet</p>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Footer -->
-    <footer class="footer">
-      <p>Ninja Bot v1.0 - Telegram Auto-Reply with Mistral AI</p>
-    </footer>
-  </div>
-
-  <script src="renderer.js"></script>
+    <script>
+        let currentLogs = [];
+        
+        function showTab(tabName) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            event.target.classList.add('active');
+            document.getElementById('tab-' + tabName).classList.add('active');
+        }
+        
+        async function updateStatus() {
+            const data = await window.api.getStatus();
+            document.getElementById('statusBadge').textContent = data.running ? 'Online' : 'Offline';
+            document.getElementById('statusBadge').className = 'status-badge ' + (data.running ? 'status-online' : 'status-offline');
+            document.getElementById('statStatus').textContent = data.running ? 'Running' : 'Stopped';
+            document.getElementById('statMessages').textContent = data.messageCount;
+            document.getElementById('statUser').textContent = data.username || '-';
+            document.getElementById('startBtn').disabled = data.running;
+            document.getElementById('stopBtn').disabled = !data.running;
+        }
+        
+        async function loadConfig() {
+            const data = await window.api.getConfig();
+            document.getElementById('apiId').value = data.apiId || '';
+            document.getElementById('apiHash').value = data.apiHash || '';
+            document.getElementById('mistralKey').value = data.mistralKey || '';
+            document.getElementById('mistralModel').value = data.mistralModel || '';
+            document.getElementById('systemPrompt').value = data.systemPrompt || '';
+        }
+        
+        async function saveConfig() {
+            const config = {
+                apiId: document.getElementById('apiId').value,
+                apiHash: document.getElementById('apiHash').value,
+                mistralKey: document.getElementById('mistralKey').value,
+                mistralModel: document.getElementById('mistralModel').value,
+                systemPrompt: document.getElementById('systemPrompt').value
+            };
+            await window.api.saveConfig(config);
+            alert('Settings saved!');
+        }
+        
+        async function startBot() {
+            await window.api.startBot();
+            updateStatus();
+        }
+        
+        async function stopBot() {
+            await window.api.stopBot();
+            updateStatus();
+        }
+        
+        function renderLogs(logs) {
+            if (!logs || logs.length === 0) return '<div class="empty-state"><div class="icon">📋</div><p>No logs yet</p></div>';
+            return logs.slice().reverse().map(log => {
+                return '<div class="log-entry log-' + log.direction + '">' +
+                    '<span class="log-time">' + log.timestamp + '</span>' +
+                    '<span class="log-sender">' + log.sender + '</span>' +
+                    '<span class="log-message">' + log.message + '</span>' +
+                '</div>';
+            }).join('');
+        }
+        
+        async function loadLogs() {
+            const logs = await window.api.getLogs();
+            currentLogs = logs;
+            const html = renderLogs(logs);
+            document.getElementById('logsList').innerHTML = html;
+            document.getElementById('controlLogs').innerHTML = html;
+        }
+        
+        async function clearLogs() {
+            await window.api.clearLogs();
+            currentLogs = [];
+            loadLogs();
+        }
+        
+        // Listen for updates from main process
+        window.api.onStatusUpdate((data) => {
+            document.getElementById('statusBadge').textContent = data.running ? 'Online' : 'Offline';
+            document.getElementById('statusBadge').className = 'status-badge ' + (data.running ? 'status-online' : 'status-offline');
+            document.getElementById('statStatus').textContent = data.running ? 'Running' : 'Stopped';
+            document.getElementById('statMessages').textContent = data.messageCount;
+            document.getElementById('statUser').textContent = data.username || '-';
+            document.getElementById('startBtn').disabled = data.running;
+            document.getElementById('stopBtn').disabled = !data.running;
+        });
+        
+        window.api.onNewLog((log) => {
+            currentLogs.push(log);
+            const html = renderLogs(currentLogs);
+            document.getElementById('logsList').innerHTML = html;
+            document.getElementById('controlLogs').innerHTML = html;
+        });
+        
+        // Initialize
+        loadConfig();
+        updateStatus();
+        loadLogs();
+        setInterval(updateStatus, 3000);
+    </script>
 </body>
 </html>

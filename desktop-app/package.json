@@ -1,18 +1,23 @@
 {
-  "name": "ninja-desktop",
+  "name": "ninja-bot",
   "version": "1.0.0",
-  "description": "Ninja Bot - Telegram Auto-Reply Desktop App",
+  "description": "Ninja Bot - Telegram Auto-Reply Native Windows App",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "build": "electron-builder --win",
-    "pack": "electron-builder --dir"
+    "build": "electron-builder --win --x64",
+    "build-portable": "electron-builder --win portable"
   },
   "author": "Ninja Bot",
   "license": "MIT",
+  "dependencies": {
+    "telegram": "^2.26.16",
+    "input": "^1.0.1",
+    "mistral-ai": "^0.0.5"
+  },
   "devDependencies": {
-    "electron": "^28.0.0",
-    "electron-builder": "^24.9.1"
+    "electron": "^30.0.0",
+    "electron-builder": "^24.13.3"
   },
   "build": {
     "appId": "com.ninja.bot",
@@ -25,14 +30,16 @@
       "!dist/**"
     ],
     "win": {
-      "target": "nsis",
+      "target": [
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
       "icon": "icon.ico"
     },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "installerIcon": "icon.ico",
-      "uninstallerIcon": "icon.ico"
+    "portable": {
+      "artifactName": "NinjaBot.exe"
     }
   }
 }

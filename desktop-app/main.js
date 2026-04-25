@@ -1,91 +1,344 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
-const { spawn, exec } = require('child_process');
-const http = require('http');
+const fs = require('fs');
+const { TelegramClient } = require('telegram');
+const { StringSession } = require('telegram/sessions');
+const { NewMessage } = require('telegram/events');
+const MistralClient = require('@mistralai/mistralai').default || require('@mistralai/mistralai').Mistral;
 
 let mainWindow = null;
-let pythonProcess = null;
-const PYTHON_PORT = 58765;
+let telegramClient = null;
+let mistralClient = null;
+let isRunning = false;
+let username = null;
+let messageCount = 0;
 
-// Path to Python backend
-const isDev = !app.isPackaged;
-const getPythonPath = () => {
-  if (isDev) {
-    return path.join(__dirname, '..', 'ninja', 'app', 'main.py');
-  }
-  return path.join(process.resourcesPath, 'python', 'main.py');
+// Data paths
+const dataDir = path.join(app.getPath('userData'), 'ninja-data');
+const sessionFile = path.join(dataDir, 'session.txt');
+const configFile = path.join(dataDir, 'config.json');
+const logsFile = path.join(dataDir, 'logs.json');
+
+// Ensure data directory exists
+if (!fs.existsSync(dataDir)) {
+  fs.mkdirSync(dataDir, { recursive: true });
+}
+
+// Default config
+const defaultConfig = {
+  apiId: 36244324,
+  apiHash: '15657d847ab4b8ae111ade8e2cbca51f',
+  mistralKey: 'bz2Mp9E67ep1QfmaHzXBSJaRVOfIkx8v',
+  mistralModel: 'mistral-medium-latest',
+  systemPrompt: 'You are the personal AI assistant replying on behalf of the account owner in Telegram private chats. Be friendly, concise, and natural. Reply in the same language the user wrote in.'
 };
 
-// Check if Python backend is running
-const isBackendRunning = () => {
-  return new Promise((resolve) => {
-    const req = http.request({
-      hostname: '127.0.0.1',
-      port: PYTHON_PORT,
-      path: '/api/status',
-      method: 'GET',
-      timeout: 1000
-    }, (res) => {
-      resolve(res.statusCode === 200);
-    });
-    req.on('error', () => resolve(false));
-    req.on('timeout', () => {
-      req.destroy();
-      resolve(false);
-    });
-    req.end();
-  });
-};
+// Conversation history
+const history = {};
+const HISTORY_LIMIT = 12;
 
-// Start Python backend
-const startPythonBackend = () => {
-  return new Promise(async (resolve, reject) => {
-    const running = await isBackendRunning();
-    if (running) {
-      resolve(true);
-      return;
+// Logs
+let logs = [];
+
+// Load config
+function loadConfig() {
+  try {
+    if (fs.existsSync(configFile)) {
+      return { ...defaultConfig, ...JSON.parse(fs.readFileSync(configFile, 'utf8')) };
     }
+  } catch (e) {
+    console.error('Load config error:', e);
+  }
+  return defaultConfig;
+}
 
-    const pythonPath = getPythonPath();
-    const pythonExe = 'python'; // or 'python3' depending on system
-    
-    pythonProcess = spawn(pythonExe, [pythonPath], {
-      cwd: path.dirname(pythonPath),
-      env: { ...process.env }
-    });
+// Save config
+function saveConfig(config) {
+  try {
+    fs.writeFileSync(configFile, JSON.stringify(config, null, 2));
+  } catch (e) {
+    console.error('Save config error:', e);
+  }
+}
 
-    pythonProcess.stdout.on('data', (data) => {
-      console.log(`Python: ${data}`);
-    });
+// Load logs
+function loadLogs() {
+  try {
+    if (fs.existsSync(logsFile)) {
+      logs = JSON.parse(fs.readFileSync(logsFile, 'utf8'));
+    }
+  } catch (e) {
+    logs = [];
+  }
+}
 
-    pythonProcess.stderr.on('data', (data) => {
-      console.error(`Python Error: ${data}`);
-    });
+// Save logs
+function saveLogsToFile() {
+  try {
+    fs.writeFileSync(logsFile, JSON.stringify(logs.slice(-500), null, 2));
+  } catch (e) {}
+}
 
-    // Wait for backend to start
-    let attempts = 0;
-    const maxAttempts = 30;
-    const checkInterval = setInterval(async () => {
-      attempts++;
-      const running = await isBackendRunning();
-      if (running) {
-        clearInterval(checkInterval);
-        resolve(true);
-      } else if (attempts >= maxAttempts) {
-        clearInterval(checkInterval);
-        reject(new Error('Backend failed to start'));
-      }
-    }, 500);
+// Add log entry
+function addLog(message, sender = 'System', direction = 'system') {
+  const entry = {
+    id: Date.now().toString(),
+    timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
+    sender,
+    message: message.substring(0, 200),
+    direction
+  };
+  logs.push(entry);
+  saveLogsToFile();
+  
+  // Send to window if exists
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('new-log', entry);
+  }
+}
+
+// Build messages for Mistral
+function buildMessages(chatId, systemPrompt) {
+  const msgs = [{ role: 'system', content: systemPrompt }];
+  if (history[chatId]) {
+    msgs.push(...history[chatId]);
+  }
+  return msgs;
+}
+
+// Push to history
+function pushHistory(chatId, role, content) {
+  if (!history[chatId]) history[chatId] = [];
+  history[chatId].push({ role, content });
+  if (history[chatId].length > HISTORY_LIMIT) {
+    history[chatId] = history[chatId].slice(-HISTORY_LIMIT);
+  }
+}
+
+// Get Mistral response
+async function getMistralResponse(messages, config) {
+  const response = await mistralClient.chat({
+    model: config.mistralModel,
+    messages: messages,
+    temperature: 0.7,
+    maxTokens: 400
   });
-};
+  return response.choices[0].message.content.trim();
+}
 
-// Create main window
-const createWindow = () => {
+// Reply to message
+async function replyToMessage(chatId, sender, text, config) {
+  const senderName = sender.firstName || sender.lastName || sender.id.toString();
+  addLog(text, senderName, 'incoming');
+  
+  pushHistory(chatId, 'user', text);
+  
+  try {
+    addLog('Getting AI response...', 'System', 'system');
+    const messages = buildMessages(chatId, config.systemPrompt);
+    const reply = await getMistralResponse(messages, config);
+    
+    pushHistory(chatId, 'assistant', reply);
+    addLog('Sending to Telegram...', 'System', 'system');
+    
+    await telegramClient.sendMessage(chatId, { message: reply });
+    messageCount++;
+    
+    addLog(reply, senderName, 'outgoing');
+  } catch (e) {
+    addLog(`Error: ${e.message}`, 'System', 'error');
+    console.error('Reply error:', e);
+  }
+}
+
+// Process unread messages
+async function processUnreadMessages(config) {
+  try {
+    const dialogs = await telegramClient.getDialogs({ limit: 100 });
+    
+    for (const dialog of dialogs) {
+      const entity = dialog.entity;
+      
+      // Skip non-users, self, bots
+      if (!entity || entity.className !== 'User' || entity.self || entity.bot) continue;
+      
+      const senderName = entity.firstName || entity.lastName || entity.id.toString();
+      
+      if (dialog.unreadCount > 0) {
+        addLog(`Found ${dialog.unreadCount} unread from ${senderName}`, 'System', 'system');
+        
+        const messages = await telegramClient.getMessages(entity, { limit: dialog.unreadCount });
+        
+        for (const msg of messages.reverse()) {
+          if (!msg.out && msg.text) {
+            await replyToMessage(dialog.id, entity, msg.text, config);
+          }
+        }
+        
+        // Mark as read
+        await telegramClient.readHistory(entity);
+      } else {
+        // Check last message
+        const messages = await telegramClient.getMessages(entity, { limit: 1 });
+        if (messages.length > 0 && messages[0] && !messages[0].out && messages[0].text) {
+          const msgTime = new Date(messages[0].date * 1000);
+          const hoursAgo = (Date.now() - msgTime.getTime()) / (1000 * 60 * 60);
+          
+          if (hoursAgo < 24) {
+            addLog(`Replying to last message from ${senderName}`, 'System', 'system');
+            await replyToMessage(dialog.id, entity, messages[0].text, config);
+          }
+        }
+      }
+    }
+  } catch (e) {
+    addLog(`Process error: ${e.message}`, 'System', 'error');
+  }
+}
+
+// Start bot
+async function startBot(config) {
+  try {
+    addLog('Starting bot...', 'System', 'system');
+    
+    // Load session
+    let sessionString = '';
+    if (fs.existsSync(sessionFile)) {
+      sessionString = fs.readFileSync(sessionFile, 'utf8');
+    }
+    
+    const stringSession = new StringSession(sessionString);
+    
+    // Create Telegram client
+    telegramClient = new TelegramClient(stringSession, config.apiId, config.apiHash, {
+      connectionRetries: 5,
+    });
+    
+    // Initialize Mistral client
+    mistralClient = new MistralClient(config.mistralKey);
+    
+    // Connect
+    await telegramClient.start({
+      phoneNumber: async () => {
+        // This will be called if no session exists
+        addLog('Please enter phone number in console...', 'System', 'system');
+        return await new Promise((resolve) => {
+          // For first-time login, we need interactive input
+          // This is handled by the 'input' package
+          const readline = require('readline');
+          const rl = readline.createInterface({
+            input: process.stdin,
+            output: process.stdout
+          });
+          rl.question('Enter phone number: ', (answer) => {
+            rl.close();
+            resolve(answer);
+          });
+        });
+      },
+      password: async () => {
+        return await new Promise((resolve) => {
+          const readline = require('readline');
+          const rl = readline.createInterface({
+            input: process.stdin,
+            output: process.stdout
+          });
+          rl.question('Enter 2FA password: ', (answer) => {
+            rl.close();
+            resolve(answer);
+          });
+        });
+      },
+      phoneCode: async () => {
+        return await new Promise((resolve) => {
+          const readline = require('readline');
+          const rl = readline.createInterface({
+            input: process.stdin,
+            output: process.stdout
+          });
+          rl.question('Enter verification code: ', (answer) => {
+            rl.close();
+            resolve(answer);
+          });
+        });
+      },
+      onError: (err) => {
+        addLog(`Login error: ${err.message}`, 'System', 'error');
+      }
+    });
+    
+    // Save session
+    fs.writeFileSync(sessionFile, telegramClient.session.save());
+    
+    // Get user info
+    const me = await telegramClient.getMe();
+    username = me.username ? `@${me.username}` : me.firstName;
+    isRunning = true;
+    
+    addLog(`Logged in as ${username}`, 'System', 'success');
+    
+    // Setup message handler
+    telegramClient.addEventHandler(async (event) => {
+      const message = event.message;
+      
+      // Skip outgoing, non-private, empty messages
+      if (message.out || !event.isPrivate || !message.text) return;
+      
+      const sender = await message.getSender();
+      
+      // Skip self and bots
+      if (sender.self || sender.bot) return;
+      
+      await replyToMessage(message.chatId, sender, message.text, config);
+    }, new NewMessage({}));
+    
+    // Process existing messages
+    addLog('Checking messages...', 'System', 'system');
+    await processUnreadMessages(config);
+    
+    addLog('Bot is running! Waiting for new messages...', 'System', 'success');
+    
+    // Update UI
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('status-update', {
+        running: isRunning,
+        username,
+        messageCount
+      });
+    }
+    
+  } catch (e) {
+    addLog(`Start error: ${e.message}`, 'System', 'error');
+    console.error('Start error:', e);
+    isRunning = false;
+  }
+}
+
+// Stop bot
+async function stopBot() {
+  if (telegramClient) {
+    await telegramClient.disconnect();
+    telegramClient = null;
+  }
+  isRunning = false;
+  addLog('Bot stopped', 'System', 'info');
+  
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('status-update', {
+      running: false,
+      username,
+      messageCount
+    });
+  }
+}
+
+// Create window
+function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1000,
-    height: 700,
-    minWidth: 800,
-    minHeight: 600,
+    width: 550,
+    height: 650,
+    minWidth: 450,
+    minHeight: 550,
     title: '🥷 Ninja Bot',
     icon: path.join(__dirname, 'icon.ico'),
     webPreferences: {
@@ -94,7 +347,8 @@ const createWindow = () => {
       preload: path.join(__dirname, 'preload.js')
     },
     backgroundColor: '#1a1a2e',
-    show: false
+    show: false,
+    autoHideMenuBar: true
   });
 
   mainWindow.loadFile('index.html');
@@ -103,14 +357,14 @@ const createWindow = () => {
     mainWindow.show();
   });
 
-  // Open DevTools in development
-  if (isDev) {
-    mainWindow.webContents.openDevTools();
-  }
-};
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
+}
 
 // App ready
-app.whenReady().then(async () => {
+app.whenReady().then(() => {
+  loadLogs();
   createWindow();
 
   app.on('activate', () => {
@@ -120,174 +374,61 @@ app.whenReady().then(async () => {
   });
 });
 
-// Quit when all windows are closed
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    if (pythonProcess) {
-      pythonProcess.kill();
-    }
-    app.quit();
+// Quit when all windows closed
+app.on('window-all-closed', async () => {
+  if (telegramClient) {
+    await telegramClient.disconnect();
   }
+  app.quit();
 });
 
-// IPC: Get backend status
-ipcMain.handle('get-status', async () => {
-  try {
-    const running = await isBackendRunning();
-    if (!running) return { running: false, username: null, message_count: 0 };
+// IPC handlers
+ipcMain.handle('get-status', () => ({
+  running: isRunning,
+  username,
+  messageCount
+}));
 
-    return new Promise((resolve) => {
-      http.request({
-        hostname: '127.0.0.1',
-        port: PYTHON_PORT,
-        path: '/api/status',
-        method: 'GET'
-      }, (res) => {
-        let data = '';
-        res.on('data', chunk => data += chunk);
-        res.on('end', () => resolve(JSON.parse(data)));
-      }).on('error', () => resolve({ running: false, username: null, message_count: 0 })).end();
-    });
-  } catch {
-    return { running: false, username: null, message_count: 0 };
-  }
+ipcMain.handle('get-config', () => {
+  const config = loadConfig();
+  return {
+    apiId: config.apiId.toString(),
+    apiHash: config.apiHash,
+    mistralKey: config.mistralKey,
+    mistralModel: config.mistralModel,
+    systemPrompt: config.systemPrompt
+  };
 });
 
-// IPC: Get config
-ipcMain.handle('get-config', async () => {
-  try {
-    return new Promise((resolve) => {
-      http.request({
-        hostname: '127.0.0.1',
-        port: PYTHON_PORT,
-        path: '/api/config',
-        method: 'GET'
-      }, (res) => {
-        let data = '';
-        res.on('data', chunk => data += chunk);
-        res.on('end', () => resolve(JSON.parse(data)));
-      }).on('error', () => resolve({})).end();
-    });
-  } catch {
-    return {};
-  }
+ipcMain.handle('save-config', (event, config) => {
+  const current = loadConfig();
+  saveConfig({
+    ...current,
+    apiId: parseInt(config.apiId) || current.apiId,
+    apiHash: config.apiHash || current.apiHash,
+    mistralKey: config.mistralKey || current.mistralKey,
+    mistralModel: config.mistralModel || current.mistralModel,
+    systemPrompt: config.systemPrompt || current.systemPrompt
+  });
+  return { success: true };
 });
 
-// IPC: Save config
-ipcMain.handle('save-config', async (event, config) => {
-  try {
-    return new Promise((resolve) => {
-      const req = http.request({
-        hostname: '127.0.0.1',
-        port: PYTHON_PORT,
-        path: '/api/config',
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-      }, (res) => {
-        let data = '';
-        res.on('data', chunk => data += chunk);
-        res.on('end', () => resolve({ success: true }));
-      }).on('error', () => resolve({ success: false }));
-      req.write(JSON.stringify(config));
-      req.end();
-    });
-  } catch {
-    return { success: false };
-  }
-});
-
-// IPC: Start bot
 ipcMain.handle('start-bot', async () => {
-  try {
-    await startPythonBackend();
-    return new Promise((resolve) => {
-      http.request({
-        hostname: '127.0.0.1',
-        port: PYTHON_PORT,
-        path: '/api/start',
-        method: 'POST'
-      }, (res) => {
-        let data = '';
-        res.on('data', chunk => data += chunk);
-        res.on('end', () => resolve({ success: true }));
-      }).on('error', () => resolve({ success: false })).end();
-    });
-  } catch {
-    return { success: false };
-  }
+  if (isRunning) return { success: true };
+  const config = loadConfig();
+  await startBot(config);
+  return { success: isRunning };
 });
 
-// IPC: Stop bot
 ipcMain.handle('stop-bot', async () => {
-  try {
-    return new Promise((resolve) => {
-      http.request({
-        hostname: '127.0.0.1',
-        port: PYTHON_PORT,
-        path: '/api/stop',
-        method: 'POST'
-      }, (res) => {
-        let data = '';
-        res.on('data', chunk => data += chunk);
-        res.on('end', () => resolve({ success: true }));
-      }).on('error', () => resolve({ success: false })).end();
-    });
-  } catch {
-    return { success: false };
-  }
+  await stopBot();
+  return { success: true };
 });
 
-// IPC: Get logs
-ipcMain.handle('get-logs', async () => {
-  try {
-    return new Promise((resolve) => {
-      http.request({
-        hostname: '127.0.0.1',
-        port: PYTHON_PORT,
-        path: '/api/logs',
-        method: 'GET'
-      }, (res) => {
-        let data = '';
-        res.on('data', chunk => data += chunk);
-        res.on('end', () => resolve(JSON.parse(data)));
-      }).on('error', () => resolve([])).end();
-    });
-  } catch {
-    return [];
-  }
-});
+ipcMain.handle('get-logs', () => logs.slice(-100));
 
-// IPC: Clear logs
-ipcMain.handle('clear-logs', async () => {
-  try {
-    return new Promise((resolve) => {
-      http.request({
-        hostname: '127.0.0.1',
-        port: PYTHON_PORT,
-        path: '/api/logs/clear',
-        method: 'POST'
-      }, (res) => {
-        let data = '';
-        res.on('data', chunk => data += chunk);
-        res.on('end', () => resolve({ success: true }));
-      }).on('error', () => resolve({ success: false })).end();
-    });
-  } catch {
-    return { success: false };
-  }
-});
-
-// IPC: Start backend manually
-ipcMain.handle('start-backend', async () => {
-  try {
-    await startPythonBackend();
-    return { success: true };
-  } catch (e) {
-    return { success: false, error: e.message };
-  }
-});
-
-// IPC: Check backend
-ipcMain.handle('check-backend', async () => {
-  return await isBackendRunning();
+ipcMain.handle('clear-logs', () => {
+  logs = [];
+  saveLogsToFile();
+  return { success: true };
 });

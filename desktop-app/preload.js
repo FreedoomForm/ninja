@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
-contextBridge.exposeInMainWorld('electronAPI', {
+// Expose protected methods to renderer
+contextBridge.exposeInMainWorld('api', {
   getStatus: () => ipcRenderer.invoke('get-status'),
   getConfig: () => ipcRenderer.invoke('get-config'),
   saveConfig: (config) => ipcRenderer.invoke('save-config', config),
@@ -8,6 +9,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   stopBot: () => ipcRenderer.invoke('stop-bot'),
   getLogs: () => ipcRenderer.invoke('get-logs'),
   clearLogs: () => ipcRenderer.invoke('clear-logs'),
-  startBackend: () => ipcRenderer.invoke('start-backend'),
-  checkBackend: () => ipcRenderer.invoke('check-backend')
+  
+  // Listen for updates
+  onStatusUpdate: (callback) => {
+    ipcRenderer.on('status-update', (event, data) => callback(data));
+  },
+  onNewLog: (callback) => {
+    ipcRenderer.on('new-log', (event, log) => callback(log));
+  }
 });
