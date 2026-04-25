@@ -16,8 +16,8 @@ import sys
 from pathlib import Path
 
 import httpx
-from telethon import TelegramClient, events
-from telethon.tl.types import User
+from telethon import TelegramClient, events, types
+from telethon.tl.types import User, PeerUser
 
 # ---------------------------------------------------------------------------
 # Hard-coded credentials (provided by user)
@@ -47,15 +47,18 @@ SYSTEM_PROMPT = (
 )
 
 # ---------------------------------------------------------------------------
-# Logging
+# Logging - reduce Telethon noise
 # ---------------------------------------------------------------------------
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s | %(levelname)-7s | %(message)s",
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("ninja")
 log.setLevel(logging.DEBUG)
+
+# Silence Telethon's verbose debug logging
+logging.getLogger("telethon").setLevel(logging.WARNING)
 
 
 # ---------------------------------------------------------------------------
@@ -101,57 +104,74 @@ async def main() -> None:
     log.info("Session file: %s.session", SESSION_PATH)
 
     client = TelegramClient(str(SESSION_PATH), API_ID, API_HASH)
-    await client.start()  # interactive prompt the very first time only
-
-    me = await client.get_me()
-    log.info("Logged in as %s (id=%s)", getattr(me, "username", None) or me.first_name, me.id)
-    print(f"\n✅ Logged in as {me.first_name} (@{me.username}). Auto-reply is ON.\n"
-          f"Press Ctrl+C to stop.\n")
-
-    @client.on(events.NewMessage(incoming=True, outgoing=False))
+    
+    # Register event handler BEFORE starting client
+    @client.on(events.NewMessage)
     async def handler(event):
-        # Debug: log all incoming events
-        log.debug("Received event: is_private=%s, chat_id=%s", event.is_private, event.chat_id)
+        # Get the message
+        message = event.message
         
-        # Only reply to private chats from real humans, not ourselves, not bots
+        # Skip outgoing messages
+        if message.out:
+            log.debug("Skipped: outgoing message")
+            return
+        
+        # Log that we received something
+        log.info("📨 Received message | chat_id=%s | is_private=%s", event.chat_id, event.is_private)
+        
+        # Only reply to private chats
         if not event.is_private:
             log.debug("Skipped: not private chat")
             return
         
+        # Get sender info
         sender = await event.get_sender()
         if not isinstance(sender, User):
             log.debug("Skipped: sender is not a User (type=%s)", type(sender).__name__)
             return
         
-        # Use getattr for robust bot check (bot attribute can be None for regular users)
-        is_bot = getattr(sender, 'bot', False) or sender.bot is True
-        if sender.is_self or is_bot:
-            log.debug("Skipped: self=%s, bot=%s", sender.is_self, is_bot)
+        # Skip self and bots
+        if sender.is_self:
+            log.debug("Skipped: message from self")
+            return
+        
+        is_bot = getattr(sender, 'bot', False)
+        if is_bot:
+            log.debug("Skipped: message from bot")
             return
 
-        text = (event.raw_text or "").strip()
+        # Get message text
+        text = (message.text or "").strip()
         if not text:
             log.debug("Skipped: empty message")
             return
         
-        log.debug("Processing message from %s", sender.first_name or sender.id)
-
         chat_id = event.chat_id
-        log.info("← [%s] %s", sender.first_name or sender.id, text[:120])
+        sender_name = sender.first_name or sender.last_name or str(sender.id)
+        log.info("← [%s] %s", sender_name, text[:120])
 
         _push_history(chat_id, "user", text)
 
         try:
             async with client.action(chat_id, "typing"):
                 reply = await mistral_chat(_build_messages(chat_id))
-        except Exception as e:  # pragma: no cover
+        except Exception as e:
             log.exception("Mistral error: %s", e)
             return
 
         _push_history(chat_id, "assistant", reply)
         await event.reply(reply)
-        log.info("→ [%s] %s", sender.first_name or sender.id, reply[:120])
+        log.info("→ [%s] %s", sender_name, reply[:120])
 
+    # Now start the client
+    await client.start()
+    
+    me = await client.get_me()
+    log.info("Logged in as %s (id=%s)", getattr(me, "username", None) or me.first_name, me.id)
+    print(f"\n✅ Logged in as {me.first_name} (@{me.username}). Auto-reply is ON.\n"
+          f"Press Ctrl+C to stop.\n")
+
+    log.info("Waiting for messages...")
     await client.run_until_disconnected()
 
 
