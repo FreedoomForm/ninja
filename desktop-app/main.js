@@ -1,9 +1,10 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
-
-// ESM modules (loaded dynamically)
-let TelegramClient, StringSession, NewMessage, Mistral;
+const { TelegramClient } = require('telegram');
+const { StringSession } = require('telegram/sessions');
+const { NewMessage } = require('telegram/events');
+const { Mistral } = require('@mistralai/mistralai');
 
 let mainWindow = null;
 let telegramClient = null;
@@ -38,19 +39,6 @@ const HISTORY_LIMIT = 12;
 
 // Logs
 let logs = [];
-
-// Load ESM modules dynamically
-async function loadModules() {
-  const telegram = await import('telegram');
-  const sessions = await import('telegram/sessions');
-  const events = await import('telegram/events');
-  const mistral = await import('@mistralai/mistralai');
-  
-  TelegramClient = telegram.TelegramClient;
-  StringSession = sessions.StringSession;
-  NewMessage = events.NewMessage;
-  Mistral = mistral.Mistral;
-}
 
 // Load config
 function loadConfig() {
@@ -372,10 +360,7 @@ function createWindow() {
 }
 
 // App ready
-app.whenReady().then(async () => {
-  // Load ESM modules first
-  await loadModules();
-  
+app.whenReady().then(() => {
   loadLogs();
   createWindow();
 

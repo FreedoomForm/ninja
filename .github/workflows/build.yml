@@ -24,6 +24,10 @@ jobs:
         working-directory: desktop-app
         run: npm install
 
+      - name: Build with esbuild
+        working-directory: desktop-app
+        run: npm run build:js
+
       - name: Build portable EXE
         working-directory: desktop-app
         run: npm run build
