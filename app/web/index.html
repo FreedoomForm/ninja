@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Ninja Bot</title>
+    <title>🥷 Ninja Userbot</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -11,71 +11,70 @@
             background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
             min-height: 100vh;
             color: #fff;
-            padding: 15px;
-            user-select: none;
+            padding: 20px;
         }
+        .container { max-width: 800px; margin: 0 auto; }
         
         .header {
             display: flex;
             align-items: center;
             justify-content: space-between;
-            padding: 12px 15px;
+            padding: 15px 20px;
             background: rgba(255,255,255,0.05);
-            border-radius: 10px;
-            margin-bottom: 12px;
+            border-radius: 12px;
+            margin-bottom: 20px;
         }
-        .header h1 { display: flex; align-items: center; gap: 8px; font-size: 18px; }
-        .header h1 span { font-size: 24px; }
+        .header h1 { display: flex; align-items: center; gap: 10px; font-size: 22px; }
         .status-badge {
-            padding: 5px 12px;
-            border-radius: 14px;
+            padding: 6px 14px;
+            border-radius: 16px;
             font-weight: 600;
-            font-size: 12px;
+            font-size: 13px;
         }
         .status-online { background: #10b981; }
         .status-offline { background: #6b7280; }
         
-        .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
+        .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 20px; }
         .stat-card {
             background: rgba(255,255,255,0.05);
-            border-radius: 8px;
-            padding: 12px;
+            border-radius: 10px;
+            padding: 15px;
             text-align: center;
         }
-        .stat-card .value { font-size: 18px; font-weight: bold; color: #10b981; }
-        .stat-card .label { color: #9ca3af; font-size: 11px; margin-top: 3px; }
+        .stat-card .value { font-size: 20px; font-weight: bold; color: #10b981; }
+        .stat-card .label { color: #9ca3af; font-size: 12px; margin-top: 4px; }
         
-        .tabs { display: flex; gap: 4px; margin-bottom: 12px; }
+        .tabs { display: flex; gap: 6px; margin-bottom: 20px; }
         .tab {
-            padding: 8px 16px;
+            padding: 10px 20px;
             background: rgba(255,255,255,0.05);
             border: none;
             color: #9ca3af;
             cursor: pointer;
-            border-radius: 6px;
-            font-size: 12px;
+            border-radius: 8px;
+            font-size: 14px;
             transition: all 0.2s;
         }
         .tab.active { background: #10b981; color: #fff; }
         .tab:hover { background: rgba(255,255,255,0.1); }
         
-        .content {
+        .panel {
             background: rgba(255,255,255,0.05);
-            border-radius: 10px;
-            padding: 12px;
-            min-height: 350px;
+            border-radius: 12px;
+            padding: 20px;
+            display: none;
         }
-        .tab-content { display: none; }
-        .tab-content.active { display: block; }
+        .panel.active { display: block; }
         
         .btn {
-            padding: 10px 20px;
+            padding: 12px 24px;
             border: none;
-            border-radius: 6px;
-            font-size: 13px;
+            border-radius: 8px;
+            font-size: 14px;
             font-weight: 600;
             cursor: pointer;
             transition: all 0.2s;
+            margin-right: 10px;
         }
         .btn-primary { background: #10b981; color: #fff; }
         .btn-primary:hover { background: #059669; }
@@ -83,34 +82,40 @@
         .btn-danger:hover { background: #dc2626; }
         .btn:disabled { opacity: 0.5; cursor: not-allowed; }
         
-        .form-group { margin-bottom: 12px; }
-        .form-group label { display: block; margin-bottom: 5px; color: #9ca3af; font-size: 12px; }
+        .form-group { margin-bottom: 16px; }
+        .form-group label { display: block; margin-bottom: 6px; color: #9ca3af; font-size: 13px; }
         .form-group input, .form-group textarea {
             width: 100%;
-            padding: 8px 10px;
+            padding: 10px 12px;
             background: rgba(0,0,0,0.3);
             border: 1px solid rgba(255,255,255,0.1);
-            border-radius: 5px;
+            border-radius: 6px;
             color: #fff;
-            font-size: 12px;
+            font-size: 14px;
         }
         .form-group input:focus, .form-group textarea:focus {
             outline: none;
             border-color: #10b981;
         }
-        .form-group small { color: #6b7280; font-size: 10px; }
+        .form-group small { color: #6b7280; font-size: 11px; }
         
-        .logs { max-height: 280px; overflow-y: auto; }
+        .logs { 
+            max-height: 350px; 
+            overflow-y: auto; 
+            background: rgba(0,0,0,0.2);
+            border-radius: 8px;
+            padding: 10px;
+        }
         .log-entry {
-            padding: 8px;
+            padding: 10px;
             border-bottom: 1px solid rgba(255,255,255,0.05);
             display: flex;
-            gap: 8px;
-            font-size: 11px;
+            gap: 10px;
+            font-size: 12px;
         }
         .log-entry:last-child { border-bottom: none; }
-        .log-time { color: #6b7280; min-width: 50px; }
-        .log-sender { color: #10b981; min-width: 70px; font-weight: 500; }
+        .log-time { color: #6b7280; min-width: 55px; }
+        .log-sender { color: #10b981; min-width: 80px; font-weight: 500; }
         .log-message { color: #e5e7eb; flex: 1; word-break: break-word; }
         .log-incoming { border-left: 3px solid #3b82f6; }
         .log-outgoing { border-left: 3px solid #10b981; }
@@ -118,9 +123,15 @@
         .log-error { border-left: 3px solid #ef4444; }
         .log-success { border-left: 3px solid #10b981; }
         
-        .control-buttons { display: flex; gap: 10px; margin-bottom: 12px; }
-        .empty-state { text-align: center; padding: 30px; color: #6b7280; }
-        .empty-state .icon { font-size: 32px; margin-bottom: 8px; }
+        .info-box {
+            background: rgba(59, 130, 246, 0.1);
+            border: 1px solid rgba(59, 130, 246, 0.3);
+            border-radius: 8px;
+            padding: 12px 16px;
+            margin-bottom: 20px;
+            font-size: 13px;
+            color: #93c5fd;
+        }
         
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-track { background: rgba(255,255,255,0.05); border-radius: 3px; }
@@ -128,87 +139,98 @@
     </style>
 </head>
 <body>
-    <div class="header">
-        <h1><span>🥷</span> Ninja Bot</h1>
-        <div id="statusBadge" class="status-badge status-offline">Offline</div>
-    </div>
-    
-    <div class="stats">
-        <div class="stat-card">
-            <div id="statStatus" class="value">Stopped</div>
-            <div class="label">Status</div>
+    <div class="container">
+        <div class="header">
+            <h1><span>🥷</span> Ninja Userbot</h1>
+            <div id="statusBadge" class="status-badge status-offline">Offline</div>
         </div>
-        <div class="stat-card">
-            <div id="statMessages" class="value">0</div>
-            <div class="label">Messages</div>
+        
+        <div class="info-box">
+            <strong>Telegram Userbot</strong> — работает как ВАШ аккаунт. 
+            Автоответчик для личных сообщений с Mistral AI.
         </div>
-        <div class="stat-card">
-            <div id="statUser" class="value">-</div>
-            <div class="label">Account</div>
+        
+        <div class="stats">
+            <div class="stat-card">
+                <div id="statStatus" class="value">Stopped</div>
+                <div class="label">Статус</div>
+            </div>
+            <div class="stat-card">
+                <div id="statMessages" class="value">0</div>
+                <div class="label">Сообщений</div>
+            </div>
+            <div class="stat-card">
+                <div id="statUser" class="value">-</div>
+                <div class="label">Аккаунт</div>
+            </div>
         </div>
-    </div>
-    
-    <div class="tabs">
-        <button class="tab active" onclick="showTab('control')">🎮 Control</button>
-        <button class="tab" onclick="showTab('settings')">⚙️ Settings</button>
-        <button class="tab" onclick="showTab('logs')">📋 Logs</button>
-    </div>
-    
-    <div class="content">
-        <div id="tab-control" class="tab-content active">
-            <div class="control-buttons">
-                <button id="startBtn" class="btn btn-primary" onclick="startBot()">▶ Start Bot</button>
-                <button id="stopBtn" class="btn btn-danger" onclick="stopBot()" disabled>⏹ Stop Bot</button>
+        
+        <div class="tabs">
+            <button class="tab active" onclick="showTab('control')">🎮 Управление</button>
+            <button class="tab" onclick="showTab('settings')">⚙️ Настройки</button>
+            <button class="tab" onclick="showTab('logs')">📋 Логи</button>
+        </div>
+        
+        <div id="tab-control" class="panel active">
+            <div style="margin-bottom: 20px;">
+                <button id="startBtn" class="btn btn-primary" onclick="startBot()">▶ Запустить</button>
+                <button id="stopBtn" class="btn btn-danger" onclick="stopBot()" disabled>⏹ Остановить</button>
             </div>
             <div class="logs" id="controlLogs"></div>
         </div>
         
-        <div id="tab-settings" class="tab-content">
+        <div id="tab-settings" class="panel">
             <div class="form-group">
                 <label>Telegram API ID</label>
                 <input type="text" id="apiId" placeholder="12345678">
-                <small>Get from my.telegram.org</small>
+                <small>Получить на my.telegram.org</small>
             </div>
             <div class="form-group">
                 <label>Telegram API Hash</label>
-                <input type="password" id="apiHash" placeholder="Enter your API hash">
+                <input type="password" id="apiHash" placeholder="a1b2c3d4e5f6...">
             </div>
             <div class="form-group">
                 <label>Mistral API Key</label>
-                <input type="password" id="mistralKey" placeholder="Enter your Mistral API key">
-                <small>Get from console.mistral.ai</small>
+                <input type="password" id="mistralKey" placeholder="your-api-key">
+                <small>Получить на console.mistral.ai</small>
             </div>
             <div class="form-group">
                 <label>Mistral Model</label>
                 <input type="text" id="mistralModel" placeholder="mistral-medium-latest">
             </div>
             <div class="form-group">
-                <label>System Prompt</label>
-                <textarea id="systemPrompt" rows="3" placeholder="Instructions for the AI..."></textarea>
+                <label>Системный промпт</label>
+                <textarea id="systemPrompt" rows="3" placeholder="Инструкции для AI..."></textarea>
             </div>
-            <button class="btn btn-primary" onclick="saveConfig()">💾 Save Settings</button>
+            <button class="btn btn-primary" onclick="saveConfig()">💾 Сохранить</button>
         </div>
         
-        <div id="tab-logs" class="tab-content">
-            <div style="margin-bottom: 10px;">
-                <button class="btn" onclick="clearLogs()" style="background:#374151;">Clear Logs</button>
-            </div>
+        <div id="tab-logs" class="panel">
+            <button class="btn" onclick="clearLogs()" style="background:#374151;margin-bottom:15px;">🗑 Очистить логи</button>
             <div class="logs" id="logsList"></div>
         </div>
+        
+        <p style="text-align:center;color:#6b7280;margin-top:30px;font-size:12px;">
+            🥷 Ninja Userbot • Terminal + Web UI<br>
+            Python backend: <code>./run.sh</code> или <code>./venv/bin/python main.py</code>
+        </p>
     </div>
 
-    <script type="text/javascript" src="/eel.js"></script>
     <script>
-        function showTab(tabName) {
+        const API = 'http://localhost:3030/api';
+        
+        function showTab(name) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.panel').forEach(t => t.classList.remove('active'));
             event.target.classList.add('active');
-            document.getElementById('tab-' + tabName).classList.add('active');
+            document.getElementById('tab-' + name).classList.add('active');
         }
         
         async function updateStatus() {
             try {
-                const data = await eel.get_status()();
+                const res = await fetch(`${API}/status`);
+                const data = await res.json();
+                
                 document.getElementById('statusBadge').textContent = data.running ? 'Online' : 'Offline';
                 document.getElementById('statusBadge').className = 'status-badge ' + (data.running ? 'status-online' : 'status-offline');
                 document.getElementById('statStatus').textContent = data.running ? 'Running' : 'Stopped';
@@ -217,94 +239,93 @@
                 document.getElementById('startBtn').disabled = data.running;
                 document.getElementById('stopBtn').disabled = !data.running;
             } catch(e) {
-                console.error('updateStatus error:', e);
+                document.getElementById('statusBadge').textContent = 'No Connection';
+                document.getElementById('statusBadge').className = 'status-badge status-offline';
             }
         }
         
         async function loadConfig() {
             try {
-                const data = await eel.get_config()();
+                const res = await fetch(`${API}/config`);
+                const data = await res.json();
                 document.getElementById('apiId').value = data.api_id || '';
                 document.getElementById('apiHash').value = data.api_hash || '';
                 document.getElementById('mistralKey').value = data.mistral_key || '';
                 document.getElementById('mistralModel').value = data.mistral_model || '';
                 document.getElementById('systemPrompt').value = data.system_prompt || '';
-            } catch(e) {
-                console.error('loadConfig error:', e);
-            }
+            } catch(e) {}
         }
         
         async function saveConfig() {
+            const config = {
+                api_id: document.getElementById('apiId').value,
+                api_hash: document.getElementById('apiHash').value,
+                mistral_key: document.getElementById('mistralKey').value,
+                mistral_model: document.getElementById('mistralModel').value,
+                system_prompt: document.getElementById('systemPrompt').value
+            };
             try {
-                await eel.save_config_api({
-                    api_id: document.getElementById('apiId').value,
-                    api_hash: document.getElementById('apiHash').value,
-                    mistral_key: document.getElementById('mistralKey').value,
-                    mistral_model: document.getElementById('mistralModel').value,
-                    system_prompt: document.getElementById('systemPrompt').value
-                })();
-                alert('Settings saved!');
+                await fetch(`${API}/config`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(config)
+                });
+                alert('✅ Сохранено!');
+                loadLogs();
             } catch(e) {
-                console.error('saveConfig error:', e);
-                alert('Error saving settings: ' + e);
+                alert('❌ Ошибка: ' + e);
             }
         }
         
         async function startBot() {
             try {
-                await eel.start_bot()();
+                await fetch(`${API}/start`, {method: 'POST'});
                 updateStatus();
-            } catch(e) {
-                console.error('startBot error:', e);
-            }
+                loadLogs();
+            } catch(e) {}
         }
         
         async function stopBot() {
             try {
-                await eel.stop_bot()();
+                await fetch(`${API}/stop`, {method: 'POST'});
                 updateStatus();
-            } catch(e) {
-                console.error('stopBot error:', e);
-            }
-        }
-        
-        function renderLogs(logs) {
-            if (!logs || logs.length === 0) return '<div class="empty-state"><div class="icon">📋</div><p>No logs yet</p></div>';
-            return logs.slice().reverse().map(log => {
-                return '<div class="log-entry log-' + log.direction + '">' +
-                    '<span class="log-time">' + log.timestamp + '</span>' +
-                    '<span class="log-sender">' + log.sender + '</span>' +
-                    '<span class="log-message">' + log.message + '</span>' +
-                '</div>';
-            }).join('');
+            } catch(e) {}
         }
         
         async function loadLogs() {
             try {
-                const logs = await eel.get_logs()();
+                const res = await fetch(`${API}/logs`);
+                const logs = await res.json();
                 const html = renderLogs(logs);
                 document.getElementById('logsList').innerHTML = html;
                 document.getElementById('controlLogs').innerHTML = html;
-            } catch(e) {
-                console.error('loadLogs error:', e);
-            }
+            } catch(e) {}
         }
         
         async function clearLogs() {
             try {
-                await eel.clear_logs()();
+                await fetch(`${API}/logs`, {method: 'DELETE'});
                 loadLogs();
-            } catch(e) {
-                console.error('clearLogs error:', e);
-            }
+            } catch(e) {}
         }
         
-        // Initialize
+        function renderLogs(logs) {
+            if (!logs || logs.length === 0) return '<p style="color:#6b7280;text-align:center;padding:20px;">Нет записей</p>';
+            return logs.slice().reverse().map(log => 
+                `<div class="log-entry log-${log.direction}">
+                    <span class="log-time">${log.timestamp}</span>
+                    <span class="log-sender">${log.sender}</span>
+                    <span class="log-message">${log.message}</span>
+                </div>`
+            ).join('');
+        }
+        
+        // Init
         loadConfig();
         updateStatus();
         loadLogs();
-        setInterval(updateStatus, 2000);
-        setInterval(loadLogs, 2000);
+        setInterval(updateStatus, 3000);
+        setInterval(loadLogs, 3000);
     </script>
 </body>
 </html>
