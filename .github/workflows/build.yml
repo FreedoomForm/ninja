@@ -1,4 +1,4 @@
-name: Build Ninja Bot
+name: Build Ninja EXE
 
 on:
   push:
