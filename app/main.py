@@ -161,6 +161,11 @@ leads_log: list = []
 
 # Bot state
 bot_instance = None
+auth_state = {
+    "step": "idle",  # idle, phone, code, password
+    "phone": None,
+    "phone_code_hash": None
+}
 
 # ---------------------------------------------------------------------------
 # Models
@@ -525,14 +530,11 @@ class TelegramUserbot:
 
     async def run(self):
         """Main userbot loop"""
+        global auth_state
         try:
             # Validate config
             if not self.config.get("api_id") or not self.config.get("api_hash"):
                 add_log("ОШИБКА: Настройте API ID и API Hash в Settings", "System", "error")
-                return
-            
-            if not self.config.get("mistral_key"):
-                add_log("ОШИБКА: Настройте Mistral API Key в Settings", "System", "error")
                 return
             
             # Create Telegram client
@@ -555,15 +557,21 @@ class TelegramUserbot:
                 # Handle message (text and/or images)
                 await self.handle_message(event.chat_id, sender, event.message)
 
-            # Start client
+            # Connect to Telegram
             add_log("Подключение к Telegram...", "System", "system")
-            await self.client.start()
+            await self.client.connect()
             
-            # Get user info
-            me = await self.client.get_me()
-            self.username = f"@{me.username}" if me.username else me.first_name
-            self.running = True
-            add_log(f"✅ Вошел как {self.username}", "System", "success")
+            # Check if already authorized
+            if await self.client.is_user_authorized():
+                me = await self.client.get_me()
+                self.username = f"@{me.username}" if me.username else me.first_name
+                self.running = True
+                add_log(f"✅ Вошел как {self.username}", "System", "success")
+            else:
+                # Need to authenticate via web UI
+                auth_state["step"] = "phone"
+                add_log("📱 Введите номер телефона в Web UI", "System", "system")
+                return
             
             # Process unread messages
             add_log("Проверка непрочитанных сообщений...", "System", "system")
@@ -703,6 +711,80 @@ async def stop_bot():
         await bot_instance.stop()
     return {"success": True}
 
+@app.get("/api/auth/status")
+async def get_auth_status():
+    """Get authentication status"""
+    global auth_state, bot_instance
+    return {
+        "step": auth_state["step"],
+        "running": bot_instance.running if bot_instance else False
+    }
+
+class PhoneModel(BaseModel):
+    phone: str
+
+class CodeModel(BaseModel):
+    code: str
+
+@app.post("/api/auth/phone")
+async def send_phone(data: PhoneModel):
+    """Send phone number for authentication"""
+    global auth_state, bot_instance
+
+    if bot_instance is None or bot_instance.client is None:
+        return {"success": False, "error": "Bot not initialized"}
+
+    try:
+        result = await bot_instance.client.send_code_request(data.phone)
+        auth_state["phone"] = data.phone
+        auth_state["phone_code_hash"] = result.phone_code_hash
+        auth_state["step"] = "code"
+        add_log(f"📱 Код отправлен на {data.phone}", "System", "system")
+        return {"success": True, "message": "Code sent"}
+    except Exception as e:
+        add_log(f"Ошибка отправки кода: {e}", "System", "error")
+        return {"success": False, "error": str(e)}
+
+@app.post("/api/auth/code")
+async def send_code(data: CodeModel):
+    """Send verification code"""
+    global auth_state, bot_instance
+
+    if bot_instance is None or bot_instance.client is None:
+        return {"success": False, "error": "Bot not initialized"}
+
+    try:
+        await bot_instance.client.sign_in(
+            auth_state["phone"],
+            data.code,
+            phone_code_hash=auth_state["phone_code_hash"]
+        )
+
+        # Success!
+        me = await bot_instance.client.get_me()
+        bot_instance.username = f"@{me.username}" if me.username else me.first_name
+        bot_instance.running = True
+        auth_state["step"] = "done"
+
+        add_log(f"✅ Вошел как {bot_instance.username}", "System", "success")
+
+        # Start message handler
+        @bot_instance.client.on(events.NewMessage)
+        async def handler(event):
+            if event.message.out or not event.is_private:
+                return
+            sender = await event.get_sender()
+            if not isinstance(sender, User) or sender.is_self or getattr(sender, 'bot', False):
+                return
+            await bot_instance.handle_message(event.chat_id, sender, event.message)
+
+        add_log("🚀 Юзербот работает!", "System", "success")
+
+        return {"success": True, "username": bot_instance.username}
+    except Exception as e:
+        add_log(f"Ошибка входа: {e}", "System", "error")
+        return {"success": False, "error": str(e)}
+
 @app.get("/api/logs")
 async def get_logs():
     return message_logs[-100:]
@@ -802,6 +884,13 @@ WEB_UI_HTML = '''<!DOCTYPE html>
         .log-image { color: #f59e0b; }
         .info-box { background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 8px; padding: 12px 16px; margin-bottom: 20px; font-size: 13px; color: #93c5fd; }
         .feature-badge { display: inline-block; padding: 3px 8px; background: rgba(16, 185, 129, 0.2); border-radius: 4px; font-size: 11px; color: #10b981; margin-left: 8px; }
+        .auth-modal { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center; }
+        .auth-modal.show { display: flex; }
+        .auth-box { background: #1a1a2e; border-radius: 16px; padding: 30px; max-width: 400px; width: 90%; text-align: center; }
+        .auth-box h2 { color: #10b981; margin-bottom: 20px; }
+        .auth-box input { width: 100%; padding: 14px; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; color: #fff; font-size: 16px; margin-bottom: 15px; text-align: center; }
+        .auth-box input:focus { outline: none; border-color: #10b981; }
+        .auth-box .btn { width: 100%; margin: 0; }
         .lead-card { background: rgba(0,0,0,0.2); border-radius: 8px; padding: 12px; margin-bottom: 10px; border-left: 4px solid #f59e0b; }
         .lead-header { display: flex; justify-content: space-between; margin-bottom: 8px; }
         .lead-client { font-weight: 600; color: #f59e0b; }
@@ -817,6 +906,16 @@ WEB_UI_HTML = '''<!DOCTYPE html>
     </style>
 </head>
 <body>
+    <!-- Auth Modal -->
+    <div id="authModal" class="auth-modal">
+        <div class="auth-box">
+            <h2 id="authTitle">📱 Введите номер телефона</h2>
+            <input type="text" id="authInput" placeholder="+998901234567">
+            <button class="btn btn-primary" onclick="submitAuth()">Продолжить</button>
+            <p id="authError" style="color:#ef4444;margin-top:15px;font-size:12px;"></p>
+        </div>
+    </div>
+
     <div class="container">
         <div class="header">
             <h1><span>🥷</span> Ninja Userbot <span class="feature-badge">Sog'lom taom</span></h1>
@@ -873,11 +972,101 @@ WEB_UI_HTML = '''<!DOCTYPE html>
     </div>
     <script>
         const API = window.location.origin + '/api';
+        let authStep = 'idle';
+
         function showTab(name) { document.querySelectorAll('.tab').forEach(t => t.classList.remove('active')); document.querySelectorAll('.panel').forEach(t => t.classList.remove('active')); event.target.classList.add('active'); document.getElementById('tab-' + name).classList.add('active'); }
-        async function updateStatus() { try { const res = await fetch(`${API}/status`); const data = await res.json(); document.getElementById('statusBadge').textContent = data.running ? 'Online' : 'Offline'; document.getElementById('statusBadge').className = 'status-badge ' + (data.running ? 'status-online' : 'status-offline'); document.getElementById('statStatus').textContent = data.running ? 'Running' : 'Stopped'; document.getElementById('statMessages').textContent = data.message_count; document.getElementById('statLeads').textContent = data.lead_count || 0; document.getElementById('statUser').textContent = data.username || '-'; document.getElementById('startBtn').disabled = data.running; document.getElementById('stopBtn').disabled = !data.running; } catch(e) { document.getElementById('statusBadge').textContent = 'No Connection'; } }
+
+        async function updateStatus() {
+            try {
+                const res = await fetch(`${API}/status`);
+                const data = await res.json();
+                document.getElementById('statusBadge').textContent = data.running ? 'Online' : 'Offline';
+                document.getElementById('statusBadge').className = 'status-badge ' + (data.running ? 'status-online' : 'status-offline');
+                document.getElementById('statStatus').textContent = data.running ? 'Running' : 'Stopped';
+                document.getElementById('statMessages').textContent = data.message_count;
+                document.getElementById('statLeads').textContent = data.lead_count || 0;
+                document.getElementById('statUser').textContent = data.username || '-';
+                document.getElementById('startBtn').disabled = data.running;
+                document.getElementById('stopBtn').disabled = !data.running;
+            } catch(e) {
+                document.getElementById('statusBadge').textContent = 'No Connection';
+            }
+        }
+
+        async function checkAuth() {
+            try {
+                const res = await fetch(`${API}/auth/status`);
+                const data = await res.json();
+                authStep = data.step;
+
+                if (authStep === 'phone') {
+                    document.getElementById('authModal').classList.add('show');
+                    document.getElementById('authTitle').textContent = '📱 Введите номер телефона';
+                    document.getElementById('authInput').placeholder = '+998901234567';
+                    document.getElementById('authInput').value = '';
+                    document.getElementById('authError').textContent = '';
+                } else if (authStep === 'code') {
+                    document.getElementById('authModal').classList.add('show');
+                    document.getElementById('authTitle').textContent = '🔢 Введите код из Telegram';
+                    document.getElementById('authInput').placeholder = '12345';
+                    document.getElementById('authInput').value = '';
+                    document.getElementById('authError').textContent = '';
+                } else if (authStep === 'done' || data.running) {
+                    document.getElementById('authModal').classList.remove('show');
+                }
+            } catch(e) {}
+        }
+
+        async function submitAuth() {
+            const input = document.getElementById('authInput').value.trim();
+            const errorEl = document.getElementById('authError');
+
+            if (!input) {
+                errorEl.textContent = 'Введите значение';
+                return;
+            }
+
+            try {
+                if (authStep === 'phone') {
+                    const res = await fetch(`${API}/auth/phone`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({phone: input})
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        authStep = 'code';
+                        document.getElementById('authTitle').textContent = '🔢 Введите код из Telegram';
+                        document.getElementById('authInput').placeholder = '12345';
+                        document.getElementById('authInput').value = '';
+                        errorEl.textContent = '';
+                    } else {
+                        errorEl.textContent = data.error || 'Ошибка';
+                    }
+                } else if (authStep === 'code') {
+                    const res = await fetch(`${API}/auth/code`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({code: input})
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        document.getElementById('authModal').classList.remove('show');
+                        authStep = 'done';
+                        updateStatus();
+                        loadLogs();
+                    } else {
+                        errorEl.textContent = data.error || 'Неверный код';
+                    }
+                }
+            } catch(e) {
+                errorEl.textContent = 'Ошибка соединения';
+            }
+        }
+
         async function loadConfig() { try { const res = await fetch(`${API}/config`); const data = await res.json(); document.getElementById('apiId').value = data.api_id || ''; document.getElementById('apiHash').value = data.api_hash || ''; document.getElementById('mistralKey').value = data.mistral_key || ''; document.getElementById('mistralModel').value = data.mistral_model || 'pixtral-12b-2409'; document.getElementById('textModel').value = data.text_model || 'mistral-medium-latest'; document.getElementById('systemPrompt').value = data.system_prompt || ''; } catch(e) {} }
         async function saveConfig() { const config = { api_id: document.getElementById('apiId').value, api_hash: document.getElementById('apiHash').value, mistral_key: document.getElementById('mistralKey').value, mistral_model: document.getElementById('mistralModel').value, text_model: document.getElementById('textModel').value, system_prompt: document.getElementById('systemPrompt').value }; try { await fetch(`${API}/config`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(config) }); alert('✅ Сохранено!'); loadLogs(); } catch(e) { alert('❌ Ошибка: ' + e); } }
-        async function startBot() { try { await fetch(`${API}/start`, {method: 'POST'}); updateStatus(); loadLogs(); } catch(e) {} }
+        async function startBot() { try { await fetch(`${API}/start`, {method: 'POST'}); setTimeout(checkAuth, 2000); updateStatus(); loadLogs(); } catch(e) {} }
         async function stopBot() { try { await fetch(`${API}/stop`, {method: 'POST'}); updateStatus(); } catch(e) {} }
         async function loadLogs() { try { const res = await fetch(`${API}/logs`); const logs = await res.json(); const html = renderLogs(logs); document.getElementById('logsList').innerHTML = html; document.getElementById('controlLogs').innerHTML = html; } catch(e) {} }
         async function clearLogs() { try { await fetch(`${API}/logs`, {method: 'DELETE'}); loadLogs(); } catch(e) {} }
@@ -886,7 +1075,15 @@ WEB_UI_HTML = '''<!DOCTYPE html>
         function renderLogs(logs) { if (!logs || logs.length === 0) return '<p style="color:#6b7280;text-align:center;padding:20px;">Нет записей</p>'; return logs.slice().reverse().map(log => { const imageIcon = log.has_image ? '<span class="log-image">🖼️</span> ' : ''; return `<div class="log-entry log-${log.direction}"><span class="log-time">${log.timestamp}</span><span class="log-sender">${log.sender}</span><span class="log-message">${imageIcon}${escapeHtml(log.message)}</span></div>`; }).join(''); }
         function renderLeads(leads) { if (!leads || leads.length === 0) return '<p style="color:#6b7280;text-align:center;padding:20px;">Нет лидов</p>'; return leads.slice().reverse().map(lead => { const urgencyClass = `urgency-${lead.urgency || 'medium'}`; return `<div class="lead-card"><div class="lead-header"><span class="lead-client">👤 ${lead.client_name || 'Клиент'}</span><span class="lead-type">${lead.lead_type || 'new_client'}</span></div><div class="lead-summary">${lead.summary || ''}</div><div class="lead-meta"><span>📊 ${((lead.confidence || 0.5) * 100).toFixed(0)}%</span><span class="${urgencyClass}">⚡ ${lead.urgency || 'medium'}</span><span>🕐 ${lead.timestamp || ''}</span></div></div>`; }).join(''); }
         function escapeHtml(text) { const div = document.createElement('div'); div.textContent = text; return div.innerHTML; }
-        loadConfig(); updateStatus(); loadLogs(); loadLeads(); setInterval(updateStatus, 3000); setInterval(loadLogs, 3000); setInterval(loadLeads, 5000);
+
+        // Handle Enter key in auth input
+        document.getElementById('authInput').addEventListener('keypress', function(e) { if (e.key === 'Enter') submitAuth(); });
+
+        loadConfig(); updateStatus(); loadLogs(); loadLeads();
+        setInterval(updateStatus, 3000);
+        setInterval(loadLogs, 3000);
+        setInterval(loadLeads, 5000);
+        setInterval(checkAuth, 2000);
     </script>
 </body>
 </html>'''
