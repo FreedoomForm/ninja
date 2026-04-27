@@ -2,6 +2,7 @@
 Ninja Userbot - Telegram Auto-Reply with Mistral AI
 Runs as YOUR Telegram account (Userbot, not Bot)
 Supports images via Mistral Vision API
+Lead tracking to Saved Messages
 """
 
 import asyncio
@@ -30,8 +31,56 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 SESSION_PATH = DATA_DIR / "ninja"
 CONFIG_FILE = DATA_DIR / "config.json"
 LOGS_FILE = DATA_DIR / "logs.json"
+LEADS_FILE = DATA_DIR / "leads.json"
 IMAGES_DIR = DATA_DIR / "images"
 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+
+# Company Info for Context
+COMPANY_INFO = """
+КОМПАНИЯ: Sog'lom taom (Соғлом таом) - здоровое питание с доставкой
+ЛОКАЦИЯ: Ташкент, Сергели район (ошхона)
+ГРАФИК: 5-дневка (пн-пт), шанба - день уборки
+
+ПАКЕТЫ:
+- Классик: стандартное меню
+- Индивидуал: можно исключить до 3 продуктов (аллергия/не нравится)
+
+КАЛОРИИ И ЦЕНЫ (с 1 мая 2026):
+- 1000–1200 ккал — 94 000 сум
+- 1400–1600 ккал — 112 000 сум
+- 1800–2000 ккал — 126 000 сум
+- 2200–2500 ккал — 140 000 сум
+- 3000–3200 ккал — 170 000 сум
+
+ДОСТАВКА:
+- Время: 17:00–22:00 по маршруту
+- 5 махаллинских овкат в порциях
+- Курьер звонит по прибытии
+- Яндекс такси - за счёт клиента
+
+ЗАКАЗ:
+- До 21:00 за день до доставки
+- Отмена до 21:00 за день до доставки
+- Минимум 3 дня для первого заказа
+- Предоплата
+
+ПРАВИЛА:
+- 15 дней на изменение списка исключений
+- Шанба: 2 пакета в пятницу для непрерывного питания
+- Результат: 5-7 кг в месяц при соблюдении графика
+
+БЖУ: 30% белок, 20% жиры, 50% углеводы
+Шакар: 10г на порцию (сахар безопаснее сахарозаменителей!)
+
+КАРТЫ:
+- Humo: 9860010112421465
+- Uzum: 4916990324223715
+- Uzcard: 5614681209925290
+- Получатель: Xodjimuratov Bahodir
+
+ИНСТАГРАМ: @soglom.taom
+ТЕЛЕГРАМ КАНАЛ: @soglomtaom
+"""
 
 DEFAULT_CONFIG = {
     "api_id": "",
@@ -39,13 +88,74 @@ DEFAULT_CONFIG = {
     "mistral_key": "",
     "mistral_model": "pixtral-12b-2409",  # Vision model for images
     "text_model": "mistral-medium-latest",  # Text-only model
-    "system_prompt": "Ты личный AI-ассистент, который отвечает от имени владельца аккаунта в Telegram. Отвечай дружелюбно, кратко и естественно. Отвечай на том же языке, на котором написал собеседник. Учитывай контекст разговора. Если присылают изображение - опиши его и прокомментируй.",
+    "system_prompt": "",
+    "lead_prompt": "",
 }
+
+# Default system prompt - realistic employee from Tashkent
+DEFAULT_SYSTEM_PROMPT = """Ты Бахром, 35-летний сотрудник компании Sog'lom taom (Соғлом таом) из Ташкента, Узбекистан. Ты работаешь в отделе доставки здорового питания и отвечаешь на сообщения клиентов в Telegram.
+
+О ТЕБЕ:
+- Родился и вырос в Ташкенте, живёшь в Сергели районе
+- Работаешь в Sog'lom taom уже 2 года
+- Знаешь всё о правильном питании, БЖУ, калориях
+- Общаешься на узбекском и русском языках
+- Используешь смесь языков как все в Ташкенте (тебе понятно "калиш", "мойсалам", "хоп-хоп")
+- Дружелюбный, но профессиональный
+- Отвечаешь быстро и по делу
+
+СТИЛЬ ОБЩЕНИЯ:
+- Пиши естественно, как реальный человек из Ташкента
+- Используй "Сиз" для новых клиентов, "Сен" для постоянных
+- Можно использовать эмодзи, но умеренно
+- Отвечай на том же языке, на котором написал клиент
+- Не пиши слишком длинные сообщения
+- Используй локальные выражения когда уместно
+
+ВАЖНО:
+- Ты НЕ бот, ты реальный человек
+- Не говори "я AI" или "я ассистент"
+- Если не знаешь ответа - скажи честно "сейчас уточню"
+- Всегда будь вежлив даже с грубыми клиентами
+- Цены и условия - только актуальные из контекста
+
+ИНФОРМАЦИЯ О КОМПАНИИ (используй при ответах):
+""" + COMPANY_INFO
+
+# Lead detection prompt
+DEFAULT_LEAD_PROMPT = """Ты анализируешь переписку с клиентом и определяешь, является ли это успешным лидом.
+
+УСПЕШНЫЙ ЛИД - клиент который:
+✅ Готов сделать заказ (назначил калории, выбрал пакет)
+✅ Запросил расчёт калорий и дал свои данные
+✅ Дал адрес доставки и контакты
+✅ Оплатил или готов оплатить
+✅ Спросил про оплату/карты
+
+НЕ ЛИД:
+❌ Просто спрашивает цены "на будущее"
+❌ Жалуется или возмущается
+❌ Нужна просто консультация без намерения купить
+❌ Спам или реклама
+
+Проанализируй переписку и ответь ТОЛЬКО в формате JSON:
+{
+  "is_lead": true/false,
+  "confidence": 0.0-1.0,
+  "lead_type": "new_client/repeat_client/consultation/payment_confirmed",
+  "client_name": "имя клиента",
+  "summary": "краткое описание что нужно сделать",
+  "urgency": "high/medium/low"
+}
+
+Если не лид - верни is_lead: false и остальные поля пустыми.
+"""
 
 # Conversation history per chat (supports multimodal content)
 HISTORY_LIMIT = 20
 conversation_history: dict[int, list[dict]] = {}
 message_logs: list = []
+leads_log: list = []
 
 # Bot state
 bot_instance = None
@@ -60,6 +170,7 @@ class ConfigModel(BaseModel):
     mistral_model: str = "pixtral-12b-2409"
     text_model: str = "mistral-medium-latest"
     system_prompt: str = ""
+    lead_prompt: str = ""
 
 # ---------------------------------------------------------------------------
 # Helper Functions
@@ -69,14 +180,22 @@ def load_config() -> dict:
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                config.update(json.load(f))
+                loaded = json.load(f)
+                config.update(loaded)
         except:
             pass
+    
+    # Ensure prompts have defaults
+    if not config.get("system_prompt"):
+        config["system_prompt"] = DEFAULT_SYSTEM_PROMPT
+    if not config.get("lead_prompt"):
+        config["lead_prompt"] = DEFAULT_LEAD_PROMPT
+    
     return config
 
 def save_config(config: dict) -> None:
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2)
+        json.dump(config, f, indent=2, ensure_ascii=False)
 
 def load_logs() -> list:
     if LOGS_FILE.exists():
@@ -89,7 +208,20 @@ def load_logs() -> list:
 
 def save_logs() -> None:
     with open(LOGS_FILE, "w", encoding="utf-8") as f:
-        json.dump(message_logs[-500:], f, indent=2)
+        json.dump(message_logs[-500:], f, indent=2, ensure_ascii=False)
+
+def load_leads() -> list:
+    if LEADS_FILE.exists():
+        try:
+            with open(LEADS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            pass
+    return []
+
+def save_leads() -> None:
+    with open(LEADS_FILE, "w", encoding="utf-8") as f:
+        json.dump(leads_log[-200:], f, indent=2, ensure_ascii=False)
 
 def add_log(message: str, sender: str = "System", direction: str = "system", has_image: bool = False):
     """Add log entry"""
@@ -107,6 +239,18 @@ def add_log(message: str, sender: str = "System", direction: str = "system", has
     message_logs.append(entry)
     save_logs()
     print(f"[{direction}] {sender}: {display_msg}")
+
+def add_lead(lead_data: dict, client_name: str, chat_id: int):
+    """Add lead to log"""
+    entry = {
+        "id": datetime.now().strftime("%Y%m%d%H%M%S%f"),
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "client_name": client_name,
+        "chat_id": chat_id,
+        **lead_data
+    }
+    leads_log.append(entry)
+    save_leads()
 
 async def download_and_encode_image(client, message) -> Optional[str]:
     """Download image from message and return base64 encoded data URL"""
@@ -158,15 +302,6 @@ async def call_mistral_vision(messages: list[dict], api_key: str, model: str) ->
     url = "https://api.mistral.ai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     
-    # Check if any message contains images
-    has_images = False
-    for msg in messages:
-        if isinstance(msg.get("content"), list):
-            for item in msg["content"]:
-                if isinstance(item, dict) and item.get("type") == "image_url":
-                    has_images = True
-                    break
-    
     payload = {
         "model": model,
         "messages": messages,
@@ -180,6 +315,27 @@ async def call_mistral_vision(messages: list[dict], api_key: str, model: str) ->
             error_detail = r.text
             raise Exception(f"API Error {r.status_code}: {error_detail}")
         return r.json()["choices"][0]["message"]["content"].strip()
+
+async def analyze_lead(conversation: list[dict], api_key: str, model: str) -> dict:
+    """Analyze conversation to detect if it's a successful lead"""
+    try:
+        messages = [
+            {"role": "system", "content": DEFAULT_LEAD_PROMPT},
+            {"role": "user", "content": f"Проанализируй переписку:\n\n{json.dumps(conversation, ensure_ascii=False, indent=2)}"}
+        ]
+        
+        result = await call_mistral_vision(messages, api_key, model)
+        
+        # Parse JSON from response
+        # Find JSON in response
+        import re
+        json_match = re.search(r'\{[^{}]*\}', result, re.DOTALL)
+        if json_match:
+            return json.loads(json_match.group())
+        return {"is_lead": False}
+    except Exception as e:
+        print(f"Lead analysis error: {e}")
+        return {"is_lead": False}
 
 def add_to_history(chat_id: int, role: str, content: Union[str, list]) -> None:
     """Add message to conversation history (supports text or multimodal content)"""
@@ -211,6 +367,36 @@ class TelegramUserbot:
         self.config = load_config()
         self.username: Optional[str] = None
         self.message_count = 0
+        self.lead_count = 0
+
+    async def send_to_saved_messages(self, lead_data: dict, client_name: str, chat_id: int):
+        """Send lead notification to Saved Messages"""
+        try:
+            urgency_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}
+            emoji = urgency_emoji.get(lead_data.get("urgency", "medium"), "🟡")
+            
+            message = f"""{emoji} НОВЫЙ ЛИД!
+
+👤 Клиент: {client_name}
+📱 Chat ID: {chat_id}
+📋 Тип: {lead_data.get('lead_type', 'new_client')}
+⏰ Срочность: {lead_data.get('urgency', 'medium')}
+
+📝 Что нужно:
+{lead_data.get('summary', 'Связаться с клиентом')}
+
+📊 Уверенность: {lead_data.get('confidence', 0.5) * 100:.0f}%
+
+🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}
+"""
+            
+            # Send to Saved Messages (chat with self)
+            me = await self.client.get_me()
+            await self.client.send_message(me.id, message)
+            add_log(f"Лид сохранён: {client_name}", "System", "lead")
+            
+        except Exception as e:
+            add_log(f"Ошибка сохранения лида: {e}", "System", "error")
 
     async def handle_message(self, chat_id: int, sender: User, message) -> None:
         """Handle incoming message (text and/or images) and generate AI reply"""
@@ -253,7 +439,7 @@ class TelegramUserbot:
             async with self.client.action(chat_id, "typing"):
                 add_log("Думаю...", "System", "system")
                 
-                messages = get_conversation_messages(chat_id, self.config["system_prompt"])
+                messages = get_conversation_messages(chat_id, self.config.get("system_prompt", DEFAULT_SYSTEM_PROMPT))
                 
                 # Use vision model if images present
                 model = self.config["mistral_model"] if has_image else self.config.get("text_model", self.config["mistral_model"])
@@ -277,6 +463,42 @@ class TelegramUserbot:
             
             # Log outgoing message
             add_log(reply, sender_name, "outgoing")
+            
+            # Analyze if this is a successful lead (every 3 messages to save API calls)
+            msg_count = len(conversation_history.get(chat_id, []))
+            if msg_count >= 3 and msg_count % 3 == 0:
+                try:
+                    # Prepare conversation for analysis (convert multimodal to text for analysis)
+                    conv_for_analysis = []
+                    for msg in conversation_history.get(chat_id, []):
+                        content = msg.get("content", "")
+                        if isinstance(content, list):
+                            # Extract text from multimodal
+                            text_parts = [item.get("text", "") for item in content if item.get("type") == "text"]
+                            conv_for_analysis.append({
+                                "role": msg["role"],
+                                "content": " ".join(text_parts) + " [изображение]"
+                            })
+                        else:
+                            conv_for_analysis.append(msg)
+                    
+                    lead_result = await analyze_lead(
+                        conv_for_analysis,
+                        self.config["mistral_key"],
+                        self.config.get("text_model", self.config["mistral_model"])
+                    )
+                    
+                    if lead_result.get("is_lead") and lead_result.get("confidence", 0) >= 0.6:
+                        # Save lead
+                        add_lead(lead_result, sender_name, chat_id)
+                        self.lead_count += 1
+                        
+                        # Send to Saved Messages
+                        await self.send_to_saved_messages(lead_result, sender_name, chat_id)
+                        
+                except Exception as e:
+                    print(f"Lead analysis error: {e}")
+                    
         except Exception as e:
             add_log(f"Send Error: {e}", "System", "error")
 
@@ -376,7 +598,7 @@ class TelegramUserbot:
             if unread_count > 0:
                 add_log(f"Обработано {unread_count} сообщений", "System", "success")
             
-            add_log("🚀 Юзербот работает! Жду новых сообщений (текст + изображения)...", "System", "success")
+            add_log("🚀 Юзербот работает! Отвечаю как сотрудник Sog'lom taom...", "System", "success")
             
             # Keep running
             await self.client.run_until_disconnected()
@@ -405,8 +627,9 @@ class TelegramUserbot:
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global message_logs
+    global message_logs, leads_log
     message_logs = load_logs()
+    leads_log = load_leads()
     yield
 
 app = FastAPI(title="Ninja Userbot API", lifespan=lifespan)
@@ -426,11 +649,12 @@ app.add_middleware(
 async def get_status():
     global bot_instance
     if bot_instance is None:
-        return {"running": False, "username": None, "message_count": 0}
+        return {"running": False, "username": None, "message_count": 0, "lead_count": 0}
     return {
         "running": bot_instance.running,
         "username": bot_instance.username,
-        "message_count": bot_instance.message_count
+        "message_count": bot_instance.message_count,
+        "lead_count": bot_instance.lead_count
     }
 
 @app.get("/api/config")
@@ -488,6 +712,18 @@ async def clear_logs():
     save_logs()
     return {"success": True}
 
+@app.get("/api/leads")
+async def get_leads():
+    """Get all leads"""
+    return leads_log[-50:]
+
+@app.delete("/api/leads")
+async def clear_leads():
+    global leads_log
+    leads_log = []
+    save_leads()
+    return {"success": True}
+
 @app.get("/api/history/{chat_id}")
 async def get_chat_history(chat_id: int, limit: int = 20):
     """Get last N messages from a specific chat"""
@@ -510,11 +746,11 @@ async def get_conversation_history(chat_id: int):
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     print("\n" + "="*50)
-    print("🥷 NINJA USERBOT (Vision Edition)")
+    print("🥷 NINJA USERBOT (Sog'lom taom Edition)")
     print("="*50)
     print("Telegram Auto-Reply with Mistral AI + Vision")
-    print("Запускается как ВАШ аккаунт (не бот)")
-    print("Поддержка текста и изображений")
+    print("Отвечает как сотрудник компании здорового питания")
+    print("Автоматическое определение лидов → Saved Messages")
     print("="*50 + "\n")
     
     import uvicorn
