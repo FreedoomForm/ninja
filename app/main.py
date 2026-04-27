@@ -17,6 +17,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import httpx
 from telethon import TelegramClient, events
@@ -740,6 +742,19 @@ async def get_conversation_history(chat_id: int):
     if chat_id in conversation_history:
         return {"chat_id": chat_id, "history": conversation_history[chat_id]}
     return {"chat_id": chat_id, "history": []}
+
+# ---------------------------------------------------------------------------
+# Web UI
+# ---------------------------------------------------------------------------
+WEB_DIR = Path(__file__).parent / "web"
+
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    """Serve web UI"""
+    html_file = WEB_DIR / "index.html"
+    if html_file.exists():
+        return HTMLResponse(content=html_file.read_text(encoding="utf-8"))
+    return HTMLResponse(content="<h1>Web UI not found</h1><p>Run from app directory</p>", status_code=404)
 
 # ---------------------------------------------------------------------------
 # Main
