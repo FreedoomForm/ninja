@@ -744,51 +744,155 @@ async def get_conversation_history(chat_id: int):
     return {"chat_id": chat_id, "history": []}
 
 # ---------------------------------------------------------------------------
-# Web UI
+# Web UI (embedded)
 # ---------------------------------------------------------------------------
-# Try multiple possible locations for web directory
-def get_web_dir() -> Path:
-    possible_paths = [
-        Path(__file__).parent / "web",  # app/web
-        Path(__file__).parent.parent / "app" / "web",  # ninja/app/web
-        Path.cwd() / "app" / "web",  # from project root
-        Path.cwd() / "web",  # from app directory
-    ]
-    for p in possible_paths:
-        if (p / "index.html").exists():
-            return p
-    return Path(__file__).parent / "web"
-
-WEB_DIR = get_web_dir()
+WEB_UI_HTML = '''<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🥷 Ninja Userbot - Sog'lom taom</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); min-height: 100vh; color: #fff; padding: 20px; }
+        .container { max-width: 900px; margin: 0 auto; }
+        .header { display: flex; align-items: center; justify-content: space-between; padding: 15px 20px; background: rgba(255,255,255,0.05); border-radius: 12px; margin-bottom: 20px; }
+        .header h1 { display: flex; align-items: center; gap: 10px; font-size: 22px; }
+        .status-badge { padding: 6px 14px; border-radius: 16px; font-weight: 600; font-size: 13px; }
+        .status-online { background: #10b981; }
+        .status-offline { background: #6b7280; }
+        .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+        .stat-card { background: rgba(255,255,255,0.05); border-radius: 10px; padding: 15px; text-align: center; }
+        .stat-card .value { font-size: 20px; font-weight: bold; color: #10b981; }
+        .stat-card .label { color: #9ca3af; font-size: 12px; margin-top: 4px; }
+        .stat-card.highlight { background: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.3); }
+        .stat-card.highlight .value { color: #34d399; }
+        .tabs { display: flex; gap: 6px; margin-bottom: 20px; flex-wrap: wrap; }
+        .tab { padding: 10px 20px; background: rgba(255,255,255,0.05); border: none; color: #9ca3af; cursor: pointer; border-radius: 8px; font-size: 14px; transition: all 0.2s; }
+        .tab.active { background: #10b981; color: #fff; }
+        .tab:hover { background: rgba(255,255,255,0.1); }
+        .panel { background: rgba(255,255,255,0.05); border-radius: 12px; padding: 20px; display: none; }
+        .panel.active { display: block; }
+        .btn { padding: 12px 24px; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s; margin-right: 10px; }
+        .btn-primary { background: #10b981; color: #fff; }
+        .btn-primary:hover { background: #059669; }
+        .btn-danger { background: #ef4444; color: #fff; }
+        .btn-danger:hover { background: #dc2626; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .form-group { margin-bottom: 16px; }
+        .form-group label { display: block; margin-bottom: 6px; color: #9ca3af; font-size: 13px; }
+        .form-group input, .form-group textarea, .form-group select { width: 100%; padding: 10px 12px; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; color: #fff; font-size: 14px; }
+        .form-group select { background: rgba(0,0,0,0.5); cursor: pointer; }
+        .form-group select option { background: #1a1a2e; color: #fff; }
+        .form-group input:focus, .form-group textarea:focus, .form-group select:focus { outline: none; border-color: #10b981; }
+        .form-group small { color: #6b7280; font-size: 11px; }
+        .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+        .logs { max-height: 350px; overflow-y: auto; background: rgba(0,0,0,0.2); border-radius: 8px; padding: 10px; }
+        .log-entry { padding: 10px; border-bottom: 1px solid rgba(255,255,255,0.05); display: flex; gap: 10px; font-size: 12px; }
+        .log-entry:last-child { border-bottom: none; }
+        .log-time { color: #6b7280; min-width: 55px; }
+        .log-sender { color: #10b981; min-width: 80px; font-weight: 500; }
+        .log-message { color: #e5e7eb; flex: 1; word-break: break-word; }
+        .log-incoming { border-left: 3px solid #3b82f6; }
+        .log-outgoing { border-left: 3px solid #10b981; }
+        .log-system { border-left: 3px solid #6b7280; }
+        .log-error { border-left: 3px solid #ef4444; }
+        .log-success { border-left: 3px solid #10b981; }
+        .log-lead { border-left: 3px solid #f59e0b; background: rgba(245, 158, 11, 0.05); }
+        .log-image { color: #f59e0b; }
+        .info-box { background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 8px; padding: 12px 16px; margin-bottom: 20px; font-size: 13px; color: #93c5fd; }
+        .feature-badge { display: inline-block; padding: 3px 8px; background: rgba(16, 185, 129, 0.2); border-radius: 4px; font-size: 11px; color: #10b981; margin-left: 8px; }
+        .lead-card { background: rgba(0,0,0,0.2); border-radius: 8px; padding: 12px; margin-bottom: 10px; border-left: 4px solid #f59e0b; }
+        .lead-header { display: flex; justify-content: space-between; margin-bottom: 8px; }
+        .lead-client { font-weight: 600; color: #f59e0b; }
+        .lead-type { font-size: 11px; padding: 2px 8px; background: rgba(245,158,11,0.2); border-radius: 4px; }
+        .lead-summary { color: #9ca3af; font-size: 12px; margin-bottom: 6px; }
+        .lead-meta { display: flex; gap: 15px; font-size: 11px; color: #6b7280; }
+        .urgency-high { color: #ef4444; }
+        .urgency-medium { color: #f59e0b; }
+        .urgency-low { color: #10b981; }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: rgba(255,255,255,0.05); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1><span>🥷</span> Ninja Userbot <span class="feature-badge">Sog'lom taom</span></h1>
+            <div id="statusBadge" class="status-badge status-offline">Offline</div>
+        </div>
+        <div class="info-box">
+            <strong>Telegram Userbot для Sog'lom taom</strong> — автоответчик для клиентов здорового питания.
+            Отвечает как реальный сотрудник + определяет успешные лиды → Saved Messages.
+        </div>
+        <div class="stats">
+            <div class="stat-card"><div id="statStatus" class="value">Stopped</div><div class="label">Статус</div></div>
+            <div class="stat-card"><div id="statMessages" class="value">0</div><div class="label">Сообщений</div></div>
+            <div class="stat-card highlight"><div id="statLeads" class="value">0</div><div class="label">Лидов</div></div>
+            <div class="stat-card"><div id="statUser" class="value">-</div><div class="label">Аккаунт</div></div>
+        </div>
+        <div class="tabs">
+            <button class="tab active" onclick="showTab('control')">🎮 Управление</button>
+            <button class="tab" onclick="showTab('leads')">🎯 Лиды</button>
+            <button class="tab" onclick="showTab('settings')">⚙️ Настройки</button>
+            <button class="tab" onclick="showTab('logs')">📋 Логи</button>
+        </div>
+        <div id="tab-control" class="panel active">
+            <div style="margin-bottom: 20px;">
+                <button id="startBtn" class="btn btn-primary" onclick="startBot()">▶ Запустить</button>
+                <button id="stopBtn" class="btn btn-danger" onclick="stopBot()" disabled>⏹ Остановить</button>
+            </div>
+            <div class="logs" id="controlLogs"></div>
+        </div>
+        <div id="tab-leads" class="panel">
+            <button class="btn" onclick="clearLeads()" style="background:#374151;margin-bottom:15px;">🗑 Очистить лиды</button>
+            <div id="leadsList"></div>
+        </div>
+        <div id="tab-settings" class="panel">
+            <h3 style="margin-bottom:16px;color:#10b981;">📱 Telegram</h3>
+            <div class="form-row">
+                <div class="form-group"><label>API ID</label><input type="text" id="apiId" placeholder="12345678"><small>Получить на my.telegram.org</small></div>
+                <div class="form-group"><label>API Hash</label><input type="password" id="apiHash" placeholder="a1b2c3d4e5f6..."></div>
+            </div>
+            <h3 style="margin:20px 0 16px;color:#10b981;">🤖 Mistral AI</h3>
+            <div class="form-group"><label>Mistral API Key</label><input type="password" id="mistralKey" placeholder="your-api-key"><small>Получить на console.mistral.ai</small></div>
+            <div class="form-row">
+                <div class="form-group"><label>Vision Model</label><select id="mistralModel"><option value="pixtral-12b-2409">Pixtral 12B</option><option value="pixtral-large-latest">Pixtral Large</option></select></div>
+                <div class="form-group"><label>Text Model</label><select id="textModel"><option value="mistral-medium-latest">Mistral Medium</option><option value="mistral-small-latest">Mistral Small</option></select></div>
+            </div>
+            <button class="btn btn-primary" onclick="saveConfig()">💾 Сохранить</button>
+        </div>
+        <div id="tab-logs" class="panel">
+            <button class="btn" onclick="clearLogs()" style="background:#374151;margin-bottom:15px;">🗑 Очистить логи</button>
+            <div class="logs" id="logsList"></div>
+        </div>
+        <p style="text-align:center;color:#6b7280;margin-top:30px;font-size:12px;">🥷 Ninja Userbot • Sog'lom taom Edition</p>
+    </div>
+    <script>
+        const API = window.location.origin + '/api';
+        function showTab(name) { document.querySelectorAll('.tab').forEach(t => t.classList.remove('active')); document.querySelectorAll('.panel').forEach(t => t.classList.remove('active')); event.target.classList.add('active'); document.getElementById('tab-' + name).classList.add('active'); }
+        async function updateStatus() { try { const res = await fetch(`${API}/status`); const data = await res.json(); document.getElementById('statusBadge').textContent = data.running ? 'Online' : 'Offline'; document.getElementById('statusBadge').className = 'status-badge ' + (data.running ? 'status-online' : 'status-offline'); document.getElementById('statStatus').textContent = data.running ? 'Running' : 'Stopped'; document.getElementById('statMessages').textContent = data.message_count; document.getElementById('statLeads').textContent = data.lead_count || 0; document.getElementById('statUser').textContent = data.username || '-'; document.getElementById('startBtn').disabled = data.running; document.getElementById('stopBtn').disabled = !data.running; } catch(e) { document.getElementById('statusBadge').textContent = 'No Connection'; } }
+        async function loadConfig() { try { const res = await fetch(`${API}/config`); const data = await res.json(); document.getElementById('apiId').value = data.api_id || ''; document.getElementById('apiHash').value = data.api_hash || ''; document.getElementById('mistralKey').value = data.mistral_key || ''; document.getElementById('mistralModel').value = data.mistral_model || 'pixtral-12b-2409'; document.getElementById('textModel').value = data.text_model || 'mistral-medium-latest'; } catch(e) {} }
+        async function saveConfig() { const config = { api_id: document.getElementById('apiId').value, api_hash: document.getElementById('apiHash').value, mistral_key: document.getElementById('mistralKey').value, mistral_model: document.getElementById('mistralModel').value, text_model: document.getElementById('textModel').value }; try { await fetch(`${API}/config`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(config) }); alert('✅ Сохранено!'); loadLogs(); } catch(e) { alert('❌ Ошибка: ' + e); } }
+        async function startBot() { try { await fetch(`${API}/start`, {method: 'POST'}); updateStatus(); loadLogs(); } catch(e) {} }
+        async function stopBot() { try { await fetch(`${API}/stop`, {method: 'POST'}); updateStatus(); } catch(e) {} }
+        async function loadLogs() { try { const res = await fetch(`${API}/logs`); const logs = await res.json(); const html = renderLogs(logs); document.getElementById('logsList').innerHTML = html; document.getElementById('controlLogs').innerHTML = html; } catch(e) {} }
+        async function clearLogs() { try { await fetch(`${API}/logs`, {method: 'DELETE'}); loadLogs(); } catch(e) {} }
+        async function loadLeads() { try { const res = await fetch(`${API}/leads`); const leads = await res.json(); document.getElementById('leadsList').innerHTML = renderLeads(leads); } catch(e) {} }
+        async function clearLeads() { try { await fetch(`${API}/leads`, {method: 'DELETE'}); loadLeads(); updateStatus(); } catch(e) {} }
+        function renderLogs(logs) { if (!logs || logs.length === 0) return '<p style="color:#6b7280;text-align:center;padding:20px;">Нет записей</p>'; return logs.slice().reverse().map(log => { const imageIcon = log.has_image ? '<span class="log-image">🖼️</span> ' : ''; return `<div class="log-entry log-${log.direction}"><span class="log-time">${log.timestamp}</span><span class="log-sender">${log.sender}</span><span class="log-message">${imageIcon}${escapeHtml(log.message)}</span></div>`; }).join(''); }
+        function renderLeads(leads) { if (!leads || leads.length === 0) return '<p style="color:#6b7280;text-align:center;padding:20px;">Нет лидов</p>'; return leads.slice().reverse().map(lead => { const urgencyClass = `urgency-${lead.urgency || 'medium'}`; return `<div class="lead-card"><div class="lead-header"><span class="lead-client">👤 ${lead.client_name || 'Клиент'}</span><span class="lead-type">${lead.lead_type || 'new_client'}</span></div><div class="lead-summary">${lead.summary || ''}</div><div class="lead-meta"><span>📊 ${((lead.confidence || 0.5) * 100).toFixed(0)}%</span><span class="${urgencyClass}">⚡ ${lead.urgency || 'medium'}</span><span>🕐 ${lead.timestamp || ''}</span></div></div>`; }).join(''); }
+        function escapeHtml(text) { const div = document.createElement('div'); div.textContent = text; return div.innerHTML; }
+        loadConfig(); updateStatus(); loadLogs(); loadLeads(); setInterval(updateStatus, 3000); setInterval(loadLogs, 3000); setInterval(loadLeads, 5000);
+    </script>
+</body>
+</html>'''
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    """Serve web UI"""
-    html_file = WEB_DIR / "index.html"
-    print(f"[DEBUG] Looking for web UI at: {html_file.absolute()}")
-    print(f"[DEBUG] Exists: {html_file.exists()}")
-    
-    if html_file.exists():
-        return HTMLResponse(content=html_file.read_text(encoding="utf-8"))
-    
-    # Return error with debug info
-    error_html = f"""
-    <html>
-    <head><title>Ninja Userbot - Setup</title></head>
-    <body style="background:#1a1a2e;color:#fff;font-family:sans-serif;padding:40px;">
-        <h1>🥷 Ninja Userbot</h1>
-        <h2 style="color:#f59e0b">Web UI not found</h2>
-        <p>Expected location: <code>{html_file.absolute()}</code></p>
-        <h3>How to fix:</h3>
-        <pre style="background:#000;padding:15px;border-radius:8px;">
-cd ninja/app
-python main.py
-        </pre>
-        <p>Then open: <a href="http://localhost:3030" style="color:#10b981">http://localhost:3030</a></p>
-    </body>
-    </html>
-    """
-    return HTMLResponse(content=error_html, status_code=404)
+    """Serve embedded web UI"""
+    return HTMLResponse(content=WEB_UI_HTML)
 
 # ---------------------------------------------------------------------------
 # Main
