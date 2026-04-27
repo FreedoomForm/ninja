@@ -88,8 +88,9 @@ DEFAULT_CONFIG = {
     "api_id": "36244324",
     "api_hash": "15657d847ab4b8ae111ade8e2cbca51f",
     "mistral_key": "bz2Mp9E67ep1QfmaHzXBSJaRVOfIkx8v",
+    "gemini_key": "AIzaSyB0TZA5Y3gB6ce-wJSnpeE3kz4wb18eBgc",
     "mistral_model": "pixtral-12b-2409",
-    "text_model": "mistral-large-latest",
+    "text_model": "gemini-2.0-flash-lite",
     "system_prompt": "",
     "lead_prompt": "",
 }
@@ -286,13 +287,94 @@ async def call_mistral_vision(messages: list[dict], api_key: str, model: str) ->
             raise Exception(f"API Error {r.status_code}: {r.text}")
         return r.json()["choices"][0]["message"]["content"].strip()
 
-async def analyze_lead(conversation: list[dict], api_key: str, model: str) -> dict:
+async def call_gemini(messages: list[dict], api_key: str, model: str = "gemini-2.0-flash-lite") -> str:
+    """Call Google Gemini API"""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+
+    # Convert messages to Gemini format
+    contents = []
+    for msg in messages:
+        role = "user" if msg["role"] == "user" else "model"
+        content = msg.get("content", "")
+
+        # Handle multimodal content
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if item.get("type") == "text":
+                    parts.append({"text": item["text"]})
+                elif item.get("type") == "image_url":
+                    # Extract base64 from data URL
+                    image_url = item.get("image_url", {}).get("url", "")
+                    if image_url.startswith("data:"):
+                        mime_end = image_url.index(";base64,")
+                        mime_type = image_url[5:mime_end]
+                        base64_data = image_url[mime_end + 8:]
+                        parts.append({
+                            "inline_data": {
+                                "mime_type": mime_type,
+                                "data": base64_data
+                            }
+                        })
+            contents.append({"role": role, "parts": parts})
+        else:
+            contents.append({"role": role, "parts": [{"text": str(content)}]})
+
+    # Extract system instruction
+    system_instruction = None
+    if messages and messages[0]["role"] == "system":
+        system_instruction = {"parts": [{"text": messages[0].get("content", "")}]}
+
+    payload = {
+        "contents": contents,
+        "generationConfig": {
+            "temperature": 0.7,
+            "maxOutputTokens": 1000
+        }
+    }
+    if system_instruction:
+        payload["systemInstruction"] = system_instruction
+
+    async with httpx.AsyncClient(timeout=120) as http_client:
+        r = await http_client.post(url, json=payload)
+        if r.status_code != 200:
+            raise Exception(f"Gemini API Error {r.status_code}: {r.text}")
+        result = r.json()
+        return result["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+def is_gemini_model(model: str) -> bool:
+    """Check if model is Gemini"""
+    return model.startswith("gemini")
+
+async def call_ai(messages: list[dict], cfg: dict, model: str = None) -> str:
+    """Call appropriate AI based on model selection"""
+    if model is None:
+        model = cfg.get("text_model", "gemini-2.0-flash-lite")
+
+    # Add current date/time context
+    now = datetime.now()
+    time_context = f"\n\n[ТЕКУЩЕЕ ВРЕМЯ: {now.strftime('%d.%m.%Y %H:%M')} ({now.strftime('%A')})]"
+
+    # Add time context to system message
+    messages_with_time = messages.copy()
+    if messages_with_time and messages_with_time[0]["role"] == "system":
+        messages_with_time[0] = {
+            "role": "system",
+            "content": messages_with_time[0]["content"] + time_context
+        }
+
+    if is_gemini_model(model):
+        return await call_gemini(messages_with_time, cfg.get("gemini_key", ""), model)
+    else:
+        return await call_mistral_vision(messages_with_time, cfg.get("mistral_key", ""), model)
+
+async def analyze_lead(conversation: list[dict], cfg: dict, model: str) -> dict:
     try:
         messages = [
             {"role": "system", "content": DEFAULT_LEAD_PROMPT},
             {"role": "user", "content": f"Проанализируй переписку:\n\n{json.dumps(conversation, ensure_ascii=False, indent=2)}"}
         ]
-        result = await call_mistral_vision(messages, api_key, model)
+        result = await call_ai(messages, cfg, model)
         import re
         json_match = re.search(r'\{[^{}]*\}', result, re.DOTALL)
         if json_match:
@@ -373,8 +455,9 @@ async def handle_message(chat_id: int, sender: User, message):
         async with client.action(chat_id, "typing"):
             add_log("Думаю...", "System", "system")
             messages = get_conversation_messages(chat_id, config.get("system_prompt", DEFAULT_SYSTEM_PROMPT))
-            model = config["mistral_model"] if has_image else config.get("text_model", config["mistral_model"])
-            reply = await call_mistral_vision(messages, config["mistral_key"], model)
+            # Use vision model for images, text model otherwise
+            model = config["mistral_model"] if has_image else config.get("text_model", "gemini-2.0-flash-lite")
+            reply = await call_ai(messages, config, model)
     except Exception as e:
         add_log(f"AI Error: {e}", "System", "error")
         return
@@ -397,7 +480,7 @@ async def handle_message(chat_id: int, sender: User, message):
                     else:
                         conv_for_analysis.append(msg)
 
-                lead_result = await analyze_lead(conv_for_analysis, config["mistral_key"], config.get("text_model", config["mistral_model"]))
+                lead_result = await analyze_lead(conv_for_analysis, config, config.get("text_model", "gemini-2.0-flash-lite"))
                 if lead_result.get("is_lead") and lead_result.get("confidence", 0) >= 0.6:
                     add_lead(lead_result, sender_name, chat_id)
                     lead_count += 1
@@ -496,8 +579,9 @@ class ConfigModel(BaseModel):
     api_id: str = ""
     api_hash: str = ""
     mistral_key: str = ""
+    gemini_key: str = ""
     mistral_model: str = "pixtral-12b-2409"
-    text_model: str = "mistral-medium-latest"
+    text_model: str = "gemini-2.0-flash-lite"
     system_prompt: str = ""
     lead_prompt: str = ""
 
@@ -822,12 +906,12 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                 <div class="form-group"><label>API ID</label><input type="text" id="apiId" placeholder="12345678"><small>Получить на my.telegram.org</small></div>
                 <div class="form-group"><label>API Hash</label><input type="password" id="apiHash" placeholder="a1b2c3d4e5f6..."></div>
             </div>
-            <h3 style="margin:20px 0 16px;color:#10b981;">🤖 Mistral AI</h3>
-            <div class="form-group"><label>Mistral API Key</label><input type="password" id="mistralKey" placeholder="your-api-key"><small>Получить на console.mistral.ai</small></div>
-            <div class="form-row">
-                <div class="form-group"><label>Vision Model</label><select id="mistralModel"><option value="pixtral-12b-2409">Pixtral 12B</option><option value="pixtral-large-latest">Pixtral Large</option></select></div>
-                <div class="form-group"><label>Text Model</label><select id="textModel"><option value="mistral-large-latest">Mistral Large</option><option value="mistral-medium-latest">Mistral Medium</option><option value="mistral-small-latest">Mistral Small</option></select></div>
-            </div>
+            <h3 style="margin:20px 0 16px;color:#10b981;">🤖 Mistral AI (Vision)</h3>
+            <div class="form-group"><label>Mistral API Key</label><input type="password" id="mistralKey" placeholder="your-api-key"><small>Для изображений (Pixtral)</small></div>
+            <div class="form-group"><label>Vision Model</label><select id="mistralModel"><option value="pixtral-12b-2409">Pixtral 12B</option><option value="pixtral-large-latest">Pixtral Large</option></select></div>
+            <h3 style="margin:20px 0 16px;color:#10b981;">✨ Google Gemini (Text)</h3>
+            <div class="form-group"><label>Gemini API Key</label><input type="password" id="geminiKey" placeholder="your-gemini-api-key"><small>Получить на aistudio.google.com</small></div>
+            <div class="form-group"><label>Text Model</label><select id="textModel"><option value="gemini-2.0-flash-lite">Gemini 2.0 Flash Lite (рекомендуется)</option><option value="gemini-2.0-flash">Gemini 2.0 Flash</option><option value="gemini-1.5-flash">Gemini 1.5 Flash</option><option value="gemini-1.5-pro">Gemini 1.5 Pro</option><option value="mistral-large-latest">Mistral Large</option><option value="mistral-medium-latest">Mistral Medium</option></select></div>
             <h3 style="margin:20px 0 16px;color:#10b981;">💬 System Prompt</h3>
             <div class="form-group"><label>Инструкции для AI</label><textarea id="systemPrompt" rows="6" placeholder="Ты Бахром, сотрудник Sog'lom taom..." style="font-size:12px;"></textarea><small>Оставьте пустым для дефолтного промпта</small></div>
             <button class="btn btn-primary" onclick="saveConfig()">💾 Сохранить</button>
@@ -937,35 +1021,37 @@ WEB_UI_HTML = '''<!DOCTYPE html>
             }
         }
 
-        async function loadConfig() { 
-            try { 
-                const res = await fetch(`${API}/config`); 
-                const data = await res.json(); 
-                document.getElementById('apiId').value = data.api_id || ''; 
-                document.getElementById('apiHash').value = data.api_hash || ''; 
-                document.getElementById('mistralKey').value = data.mistral_key || ''; 
-                document.getElementById('mistralModel').value = data.mistral_model || 'pixtral-12b-2409'; 
-                document.getElementById('textModel').value = data.text_model || 'mistral-large-latest'; 
-                document.getElementById('systemPrompt').value = data.system_prompt || ''; 
-            } catch(e) {} 
+        async function loadConfig() {
+            try {
+                const res = await fetch(`${API}/config`);
+                const data = await res.json();
+                document.getElementById('apiId').value = data.api_id || '';
+                document.getElementById('apiHash').value = data.api_hash || '';
+                document.getElementById('mistralKey').value = data.mistral_key || '';
+                document.getElementById('geminiKey').value = data.gemini_key || '';
+                document.getElementById('mistralModel').value = data.mistral_model || 'pixtral-12b-2409';
+                document.getElementById('textModel').value = data.text_model || 'gemini-2.0-flash-lite';
+                document.getElementById('systemPrompt').value = data.system_prompt || '';
+            } catch(e) {}
         }
         
-        async function saveConfig() { 
-            const cfg = { 
-                api_id: document.getElementById('apiId').value, 
-                api_hash: document.getElementById('apiHash').value, 
-                mistral_key: document.getElementById('mistralKey').value, 
-                mistral_model: document.getElementById('mistralModel').value, 
-                text_model: document.getElementById('textModel').value, 
-                system_prompt: document.getElementById('systemPrompt').value 
-            }; 
-            try { 
-                await fetch(`${API}/config`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(cfg) }); 
-                alert('✅ Сохранено!'); 
-                loadLogs(); 
-            } catch(e) { 
-                alert('❌ Ошибка: ' + e); 
-            } 
+        async function saveConfig() {
+            const cfg = {
+                api_id: document.getElementById('apiId').value,
+                api_hash: document.getElementById('apiHash').value,
+                mistral_key: document.getElementById('mistralKey').value,
+                gemini_key: document.getElementById('geminiKey').value,
+                mistral_model: document.getElementById('mistralModel').value,
+                text_model: document.getElementById('textModel').value,
+                system_prompt: document.getElementById('systemPrompt').value
+            };
+            try {
+                await fetch(`${API}/config`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(cfg) });
+                alert('✅ Сохранено!');
+                loadLogs();
+            } catch(e) {
+                alert('❌ Ошибка: ' + e);
+            }
         }
         
         async function startBot() { 
