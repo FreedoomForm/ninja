@@ -1050,19 +1050,27 @@ WEB_UI_HTML = '''<!DOCTYPE html>
             if (e.key === 'Enter') submitAuth(); 
         });
 
-        // Load once on start - NO periodic requests to avoid blocking
+        // Load once on start - NO periodic requests!
+        console.log('Ninja Userbot v2 - No auto-refresh');
         loadConfig(); 
         updateStatus(); 
         loadLogs(); 
         loadLeads();
-        // setInterval removed - user can refresh manually
+        // NO setInterval - user clicks Refresh button instead
     </script>
 </body>
 </html>'''
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    return HTMLResponse(content=WEB_UI_HTML)
+    return HTMLResponse(
+        content=WEB_UI_HTML,
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0"
+        }
+    )
 
 # ---------------------------------------------------------------------------
 # Main
