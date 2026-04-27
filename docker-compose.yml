@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  ninja-userbot:
+    build: .
+    container_name: ninja-userbot
+    restart: unless-stopped
+    ports:
+      - "3030:3030"
+    volumes:
+      - ninja-data:/root/.ninja-data
+    environment:
+      - DATA_DIR=/root/.ninja-data
+
+volumes:
+  ninja-data:
