@@ -1,15 +1,17 @@
 """
 Ninja Userbot - Telegram Auto-Reply with Mistral AI
 Runs as YOUR Telegram account (Userbot, not Bot)
+Supports images via Mistral Vision API
 """
 
 import asyncio
 import json
 import os
 import sys
+import base64
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -17,7 +19,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import httpx
 from telethon import TelegramClient, events
-from telethon.tl.types import User
+from telethon.tl.types import User, Photo, Document
+from telethon.tl.types import MessageMediaPhoto
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -27,16 +30,19 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 SESSION_PATH = DATA_DIR / "ninja"
 CONFIG_FILE = DATA_DIR / "config.json"
 LOGS_FILE = DATA_DIR / "logs.json"
+IMAGES_DIR = DATA_DIR / "images"
+IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_CONFIG = {
     "api_id": "",
     "api_hash": "",
     "mistral_key": "",
-    "mistral_model": "mistral-medium-latest",
-    "system_prompt": "Ты личный AI-ассистент, который отвечает от имени владельца аккаунта в Telegram. Отвечай дружелюбно, кратко и естественно. Отвечай на том же языке, на котором написал собеседник. Учитывай контекст разговора.",
+    "mistral_model": "pixtral-12b-2409",  # Vision model for images
+    "text_model": "mistral-medium-latest",  # Text-only model
+    "system_prompt": "Ты личный AI-ассистент, который отвечает от имени владельца аккаунта в Telegram. Отвечай дружелюбно, кратко и естественно. Отвечай на том же языке, на котором написал собеседник. Учитывай контекст разговора. Если присылают изображение - опиши его и прокомментируй.",
 }
 
-# Conversation history per chat (properly maintained)
+# Conversation history per chat (supports multimodal content)
 HISTORY_LIMIT = 20
 conversation_history: dict[int, list[dict]] = {}
 message_logs: list = []
@@ -51,7 +57,8 @@ class ConfigModel(BaseModel):
     api_id: str = ""
     api_hash: str = ""
     mistral_key: str = ""
-    mistral_model: str = "mistral-medium-latest"
+    mistral_model: str = "pixtral-12b-2409"
+    text_model: str = "mistral-medium-latest"
     system_prompt: str = ""
 
 # ---------------------------------------------------------------------------
@@ -84,36 +91,98 @@ def save_logs() -> None:
     with open(LOGS_FILE, "w", encoding="utf-8") as f:
         json.dump(message_logs[-500:], f, indent=2)
 
-def add_log(message: str, sender: str = "System", direction: str = "system"):
+def add_log(message: str, sender: str = "System", direction: str = "system", has_image: bool = False):
     """Add log entry"""
+    display_msg = message[:200] if len(message) > 200 else message
+    if has_image:
+        display_msg = "[IMAGE] " + display_msg
     entry = {
         "id": datetime.now().strftime("%Y%m%d%H%M%S%f"),
         "timestamp": datetime.now().strftime("%H:%M:%S"),
         "sender": sender,
-        "message": message[:200],
-        "direction": direction
+        "message": display_msg,
+        "direction": direction,
+        "has_image": has_image
     }
     message_logs.append(entry)
     save_logs()
-    print(f"[{direction}] {sender}: {message}")
+    print(f"[{direction}] {sender}: {display_msg}")
 
-async def call_mistral(messages: list[dict], api_key: str, model: str) -> str:
-    """Call Mistral AI with full conversation history"""
+async def download_and_encode_image(client, message) -> Optional[str]:
+    """Download image from message and return base64 encoded data URL"""
+    try:
+        if not message.media:
+            return None
+        
+        # Handle photo
+        if isinstance(message.media, MessageMediaPhoto):
+            photo = message.media.photo
+            if photo:
+                # Download the photo
+                file_path = await client.download_media(photo, IMAGES_DIR)
+                
+                # Read and encode
+                with open(file_path, "rb") as f:
+                    image_data = f.read()
+                
+                # Determine mime type
+                ext = Path(file_path).suffix.lower()
+                mime_types = {
+                    '.jpg': 'image/jpeg',
+                    '.jpeg': 'image/jpeg',
+                    '.png': 'image/png',
+                    '.gif': 'image/gif',
+                    '.webp': 'image/webp'
+                }
+                mime_type = mime_types.get(ext, 'image/jpeg')
+                
+                # Create data URL
+                base64_data = base64.b64encode(image_data).decode('utf-8')
+                data_url = f"data:{mime_type};base64,{base64_data}"
+                
+                # Cleanup temp file
+                try:
+                    os.remove(file_path)
+                except:
+                    pass
+                
+                return data_url
+        
+        return None
+    except Exception as e:
+        print(f"Error downloading image: {e}")
+        return None
+
+async def call_mistral_vision(messages: list[dict], api_key: str, model: str) -> str:
+    """Call Mistral AI with vision support for multimodal messages"""
     url = "https://api.mistral.ai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    
+    # Check if any message contains images
+    has_images = False
+    for msg in messages:
+        if isinstance(msg.get("content"), list):
+            for item in msg["content"]:
+                if isinstance(item, dict) and item.get("type") == "image_url":
+                    has_images = True
+                    break
+    
     payload = {
         "model": model,
         "messages": messages,
         "temperature": 0.7,
-        "max_tokens": 500
+        "max_tokens": 1000
     }
-    async with httpx.AsyncClient(timeout=60) as client:
+    
+    async with httpx.AsyncClient(timeout=120) as client:
         r = await client.post(url, headers=headers, json=payload)
-        r.raise_for_status()
+        if r.status_code != 200:
+            error_detail = r.text
+            raise Exception(f"API Error {r.status_code}: {error_detail}")
         return r.json()["choices"][0]["message"]["content"].strip()
 
-def add_to_history(chat_id: int, role: str, content: str) -> None:
-    """Add message to conversation history"""
+def add_to_history(chat_id: int, role: str, content: Union[str, list]) -> None:
+    """Add message to conversation history (supports text or multimodal content)"""
     if chat_id not in conversation_history:
         conversation_history[chat_id] = []
     
@@ -143,27 +212,56 @@ class TelegramUserbot:
         self.username: Optional[str] = None
         self.message_count = 0
 
-    async def handle_message(self, chat_id: int, sender: User, text: str) -> None:
-        """Handle incoming message and generate AI reply"""
+    async def handle_message(self, chat_id: int, sender: User, message) -> None:
+        """Handle incoming message (text and/or images) and generate AI reply"""
         sender_name = sender.first_name or sender.last_name or str(sender.id)
         
-        # Log incoming message
-        add_log(text, sender_name, "incoming")
+        text = (message.text or "").strip()
+        has_image = False
+        image_url = None
         
-        # Add user message to history
-        add_to_history(chat_id, "user", text)
+        # Check for image
+        if message.media:
+            image_url = await download_and_encode_image(self.client, message)
+            if image_url:
+                has_image = True
+        
+        # Skip if no text and no image
+        if not text and not has_image:
+            return
+        
+        # Log incoming message
+        add_log(text if text else "(изображение)", sender_name, "incoming", has_image)
+        
+        # Build content for history
+        if has_image:
+            # Multimodal content with image
+            content = []
+            if text:
+                content.append({"type": "text", "text": text})
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": image_url}
+            })
+            add_to_history(chat_id, "user", content)
+        else:
+            # Text only
+            add_to_history(chat_id, "user", text)
         
         try:
             # Show typing indicator
             async with self.client.action(chat_id, "typing"):
-                # Get AI response with full conversation context
                 add_log("Думаю...", "System", "system")
                 
                 messages = get_conversation_messages(chat_id, self.config["system_prompt"])
-                reply = await call_mistral(
+                
+                # Use vision model if images present
+                model = self.config["mistral_model"] if has_image else self.config.get("text_model", self.config["mistral_model"])
+                
+                reply = await call_mistral_vision(
                     messages,
                     self.config["mistral_key"],
-                    self.config["mistral_model"]
+                    model
                 )
         except Exception as e:
             add_log(f"AI Error: {e}", "System", "error")
@@ -181,6 +279,25 @@ class TelegramUserbot:
             add_log(reply, sender_name, "outgoing")
         except Exception as e:
             add_log(f"Send Error: {e}", "System", "error")
+
+    async def fetch_chat_history(self, chat_id: int, limit: int = 20) -> list:
+        """Fetch last N messages from chat including images"""
+        messages = []
+        try:
+            async for msg in self.client.iter_messages(chat_id, limit=limit):
+                msg_data = {
+                    "id": msg.id,
+                    "text": msg.text or "",
+                    "date": msg.date.isoformat() if msg.date else None,
+                    "out": msg.out,
+                    "has_media": bool(msg.media),
+                    "sender_id": msg.sender_id
+                }
+                messages.append(msg_data)
+            return messages
+        except Exception as e:
+            add_log(f"Error fetching history: {e}", "System", "error")
+            return []
 
     async def run(self):
         """Main userbot loop"""
@@ -211,11 +328,8 @@ class TelegramUserbot:
                 if not isinstance(sender, User) or sender.is_self or getattr(sender, 'bot', False):
                     return
                 
-                text = (event.message.text or "").strip()
-                if not text:
-                    return
-                
-                await self.handle_message(event.chat_id, sender, text)
+                # Handle message (text and/or images)
+                await self.handle_message(event.chat_id, sender, event.message)
 
             # Start client
             add_log("Подключение к Telegram...", "System", "system")
@@ -250,8 +364,9 @@ class TelegramUserbot:
                             limit=dialog.unread_count,
                             reverse=True
                         ):
-                            if not message.out and message.text:
-                                await self.handle_message(dialog.id, entity, message.text.strip())
+                            if not message.out:
+                                # Handle message with possible images
+                                await self.handle_message(dialog.id, entity, message)
                                 unread_count += 1
                         
                         await self.client.send_read_acknowledge(dialog.entity)
@@ -261,7 +376,7 @@ class TelegramUserbot:
             if unread_count > 0:
                 add_log(f"Обработано {unread_count} сообщений", "System", "success")
             
-            add_log("🚀 Юзербот работает! Жду новых сообщений...", "System", "success")
+            add_log("🚀 Юзербот работает! Жду новых сообщений (текст + изображения)...", "System", "success")
             
             # Keep running
             await self.client.run_until_disconnected()
@@ -373,15 +488,33 @@ async def clear_logs():
     save_logs()
     return {"success": True}
 
+@app.get("/api/history/{chat_id}")
+async def get_chat_history(chat_id: int, limit: int = 20):
+    """Get last N messages from a specific chat"""
+    global bot_instance
+    if bot_instance is None or not bot_instance.running:
+        return {"error": "Bot not running"}
+    
+    history = await bot_instance.fetch_chat_history(chat_id, limit)
+    return {"chat_id": chat_id, "messages": history}
+
+@app.get("/api/conversation/{chat_id}")
+async def get_conversation_history(chat_id: int):
+    """Get conversation history stored in memory"""
+    if chat_id in conversation_history:
+        return {"chat_id": chat_id, "history": conversation_history[chat_id]}
+    return {"chat_id": chat_id, "history": []}
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     print("\n" + "="*50)
-    print("🥷 NINJA USERBOT")
+    print("🥷 NINJA USERBOT (Vision Edition)")
     print("="*50)
-    print("Telegram Auto-Reply with Mistral AI")
+    print("Telegram Auto-Reply with Mistral AI + Vision")
     print("Запускается как ВАШ аккаунт (не бот)")
+    print("Поддержка текста и изображений")
     print("="*50 + "\n")
     
     import uvicorn

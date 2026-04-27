@@ -44,7 +44,7 @@
         .stat-card .value { font-size: 20px; font-weight: bold; color: #10b981; }
         .stat-card .label { color: #9ca3af; font-size: 12px; margin-top: 4px; }
         
-        .tabs { display: flex; gap: 6px; margin-bottom: 20px; }
+        .tabs { display: flex; gap: 6px; margin-bottom: 20px; flex-wrap: wrap; }
         .tab {
             padding: 10px 20px;
             background: rgba(255,255,255,0.05);
@@ -84,7 +84,7 @@
         
         .form-group { margin-bottom: 16px; }
         .form-group label { display: block; margin-bottom: 6px; color: #9ca3af; font-size: 13px; }
-        .form-group input, .form-group textarea {
+        .form-group input, .form-group textarea, .form-group select {
             width: 100%;
             padding: 10px 12px;
             background: rgba(0,0,0,0.3);
@@ -93,11 +93,25 @@
             color: #fff;
             font-size: 14px;
         }
-        .form-group input:focus, .form-group textarea:focus {
+        .form-group select {
+            background: rgba(0,0,0,0.5);
+            cursor: pointer;
+        }
+        .form-group select option {
+            background: #1a1a2e;
+            color: #fff;
+        }
+        .form-group input:focus, .form-group textarea:focus, .form-group select:focus {
             outline: none;
             border-color: #10b981;
         }
         .form-group small { color: #6b7280; font-size: 11px; }
+        
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
         
         .logs { 
             max-height: 350px; 
@@ -122,6 +136,7 @@
         .log-system { border-left: 3px solid #6b7280; }
         .log-error { border-left: 3px solid #ef4444; }
         .log-success { border-left: 3px solid #10b981; }
+        .log-image { color: #f59e0b; }
         
         .info-box {
             background: rgba(59, 130, 246, 0.1);
@@ -133,6 +148,16 @@
             color: #93c5fd;
         }
         
+        .feature-badge {
+            display: inline-block;
+            padding: 3px 8px;
+            background: rgba(16, 185, 129, 0.2);
+            border-radius: 4px;
+            font-size: 11px;
+            color: #10b981;
+            margin-left: 8px;
+        }
+        
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-track { background: rgba(255,255,255,0.05); border-radius: 3px; }
         ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 3px; }
@@ -141,13 +166,13 @@
 <body>
     <div class="container">
         <div class="header">
-            <h1><span>🥷</span> Ninja Userbot</h1>
+            <h1><span>🥷</span> Ninja Userbot <span class="feature-badge">Vision</span></h1>
             <div id="statusBadge" class="status-badge status-offline">Offline</div>
         </div>
         
         <div class="info-box">
             <strong>Telegram Userbot</strong> — работает как ВАШ аккаунт. 
-            Автоответчик для личных сообщений с Mistral AI.
+            Автоответчик для личных сообщений с Mistral AI + поддержка изображений!
         </div>
         
         <div class="stats">
@@ -180,28 +205,54 @@
         </div>
         
         <div id="tab-settings" class="panel">
-            <div class="form-group">
-                <label>Telegram API ID</label>
-                <input type="text" id="apiId" placeholder="12345678">
-                <small>Получить на my.telegram.org</small>
+            <h3 style="margin-bottom:16px;color:#10b981;">📱 Telegram</h3>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>API ID</label>
+                    <input type="text" id="apiId" placeholder="12345678">
+                    <small>Получить на my.telegram.org</small>
+                </div>
+                <div class="form-group">
+                    <label>API Hash</label>
+                    <input type="password" id="apiHash" placeholder="a1b2c3d4e5f6...">
+                </div>
             </div>
-            <div class="form-group">
-                <label>Telegram API Hash</label>
-                <input type="password" id="apiHash" placeholder="a1b2c3d4e5f6...">
-            </div>
+            
+            <h3 style="margin:20px 0 16px;color:#10b981;">🤖 Mistral AI</h3>
             <div class="form-group">
                 <label>Mistral API Key</label>
                 <input type="password" id="mistralKey" placeholder="your-api-key">
                 <small>Получить на console.mistral.ai</small>
             </div>
-            <div class="form-group">
-                <label>Mistral Model</label>
-                <input type="text" id="mistralModel" placeholder="mistral-medium-latest">
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Vision Model (для изображений)</label>
+                    <select id="mistralModel">
+                        <option value="pixtral-12b-2409">Pixtral 12B (рекомендуется)</option>
+                        <option value="pixtral-large-latest">Pixtral Large</option>
+                        <option value="mistral-large-latest">Mistral Large</option>
+                    </select>
+                    <small>Модель для обработки изображений</small>
+                </div>
+                <div class="form-group">
+                    <label>Text Model (для текста)</label>
+                    <select id="textModel">
+                        <option value="mistral-medium-latest">Mistral Medium (рекомендуется)</option>
+                        <option value="mistral-small-latest">Mistral Small</option>
+                        <option value="mistral-large-latest">Mistral Large</option>
+                        <option value="open-mistral-nemo">Mistral Nemo</option>
+                    </select>
+                    <small>Модель для текстовых сообщений</small>
+                </div>
             </div>
+            
+            <h3 style="margin:20px 0 16px;color:#10b981;">💬 Промпт</h3>
             <div class="form-group">
                 <label>Системный промпт</label>
-                <textarea id="systemPrompt" rows="3" placeholder="Инструкции для AI..."></textarea>
+                <textarea id="systemPrompt" rows="4" placeholder="Инструкции для AI..."></textarea>
+                <small>Инструкции для AI-ассистента</small>
             </div>
+            
             <button class="btn btn-primary" onclick="saveConfig()">💾 Сохранить</button>
         </div>
         
@@ -211,7 +262,7 @@
         </div>
         
         <p style="text-align:center;color:#6b7280;margin-top:30px;font-size:12px;">
-            🥷 Ninja Userbot • Terminal + Web UI<br>
+            🥷 Ninja Userbot • Vision Edition<br>
             Python backend: <code>./run.sh</code> или <code>./venv/bin/python main.py</code>
         </p>
     </div>
@@ -251,7 +302,8 @@
                 document.getElementById('apiId').value = data.api_id || '';
                 document.getElementById('apiHash').value = data.api_hash || '';
                 document.getElementById('mistralKey').value = data.mistral_key || '';
-                document.getElementById('mistralModel').value = data.mistral_model || '';
+                document.getElementById('mistralModel').value = data.mistral_model || 'pixtral-12b-2409';
+                document.getElementById('textModel').value = data.text_model || 'mistral-medium-latest';
                 document.getElementById('systemPrompt').value = data.system_prompt || '';
             } catch(e) {}
         }
@@ -262,6 +314,7 @@
                 api_hash: document.getElementById('apiHash').value,
                 mistral_key: document.getElementById('mistralKey').value,
                 mistral_model: document.getElementById('mistralModel').value,
+                text_model: document.getElementById('textModel').value,
                 system_prompt: document.getElementById('systemPrompt').value
             };
             try {
@@ -311,13 +364,20 @@
         
         function renderLogs(logs) {
             if (!logs || logs.length === 0) return '<p style="color:#6b7280;text-align:center;padding:20px;">Нет записей</p>';
-            return logs.slice().reverse().map(log => 
-                `<div class="log-entry log-${log.direction}">
+            return logs.slice().reverse().map(log => {
+                const imageIcon = log.has_image ? '<span class="log-image">🖼️</span> ' : '';
+                return `<div class="log-entry log-${log.direction}">
                     <span class="log-time">${log.timestamp}</span>
                     <span class="log-sender">${log.sender}</span>
-                    <span class="log-message">${log.message}</span>
-                </div>`
-            ).join('');
+                    <span class="log-message">${imageIcon}${escapeHtml(log.message)}</span>
+                </div>`;
+            }).join('');
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
         }
         
         // Init
