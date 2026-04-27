@@ -90,7 +90,7 @@ DEFAULT_CONFIG = {
     "mistral_key": "bz2Mp9E67ep1QfmaHzXBSJaRVOfIkx8v",
     "gemini_key": "AIzaSyB0TZA5Y3gB6ce-wJSnpeE3kz4wb18eBgc",
     "mistral_model": "pixtral-12b-2409",
-    "text_model": "gemini-2.0-flash-lite",
+    "text_model": "gemini-2.5-flash-preview-05-20",
     "system_prompt": "",
     "lead_prompt": "",
 }
@@ -287,7 +287,7 @@ async def call_mistral_vision(messages: list[dict], api_key: str, model: str) ->
             raise Exception(f"API Error {r.status_code}: {r.text}")
         return r.json()["choices"][0]["message"]["content"].strip()
 
-async def call_gemini(messages: list[dict], api_key: str, model: str = "gemini-2.0-flash-lite") -> str:
+async def call_gemini(messages: list[dict], api_key: str, model: str = "gemini-2.5-flash-preview-05-20") -> str:
     """Call Google Gemini API"""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
 
@@ -349,7 +349,7 @@ def is_gemini_model(model: str) -> bool:
 async def call_ai(messages: list[dict], cfg: dict, model: str = None) -> str:
     """Call appropriate AI based on model selection"""
     if model is None:
-        model = cfg.get("text_model", "gemini-2.0-flash-lite")
+        model = cfg.get("text_model", "gemini-2.5-flash-preview-05-20")
 
     # Add current date/time context
     now = datetime.now()
@@ -456,7 +456,7 @@ async def handle_message(chat_id: int, sender: User, message):
             add_log("Думаю...", "System", "system")
             messages = get_conversation_messages(chat_id, config.get("system_prompt", DEFAULT_SYSTEM_PROMPT))
             # Use vision model for images, text model otherwise
-            model = config["mistral_model"] if has_image else config.get("text_model", "gemini-2.0-flash-lite")
+            model = config["mistral_model"] if has_image else config.get("text_model", "gemini-2.5-flash-preview-05-20")
             reply = await call_ai(messages, config, model)
     except Exception as e:
         add_log(f"AI Error: {e}", "System", "error")
@@ -480,7 +480,7 @@ async def handle_message(chat_id: int, sender: User, message):
                     else:
                         conv_for_analysis.append(msg)
 
-                lead_result = await analyze_lead(conv_for_analysis, config, config.get("text_model", "gemini-2.0-flash-lite"))
+                lead_result = await analyze_lead(conv_for_analysis, config, config.get("text_model", "gemini-2.5-flash-preview-05-20"))
                 if lead_result.get("is_lead") and lead_result.get("confidence", 0) >= 0.6:
                     add_lead(lead_result, sender_name, chat_id)
                     lead_count += 1
@@ -581,7 +581,7 @@ class ConfigModel(BaseModel):
     mistral_key: str = ""
     gemini_key: str = ""
     mistral_model: str = "pixtral-12b-2409"
-    text_model: str = "gemini-2.0-flash-lite"
+    text_model: str = "gemini-2.5-flash-preview-05-20"
     system_prompt: str = ""
     lead_prompt: str = ""
 
@@ -911,7 +911,7 @@ WEB_UI_HTML = '''<!DOCTYPE html>
             <div class="form-group"><label>Vision Model</label><select id="mistralModel"><option value="pixtral-12b-2409">Pixtral 12B</option><option value="pixtral-large-latest">Pixtral Large</option></select></div>
             <h3 style="margin:20px 0 16px;color:#10b981;">✨ Google Gemini (Text)</h3>
             <div class="form-group"><label>Gemini API Key</label><input type="password" id="geminiKey" placeholder="your-gemini-api-key"><small>Получить на aistudio.google.com</small></div>
-            <div class="form-group"><label>Text Model</label><select id="textModel"><option value="gemini-2.0-flash-lite">Gemini 2.0 Flash Lite (рекомендуется)</option><option value="gemini-2.0-flash">Gemini 2.0 Flash</option><option value="gemini-1.5-flash">Gemini 1.5 Flash</option><option value="gemini-1.5-pro">Gemini 1.5 Pro</option><option value="mistral-large-latest">Mistral Large</option><option value="mistral-medium-latest">Mistral Medium</option></select></div>
+            <div class="form-group"><label>Text Model</label><input type="text" id="textModel" placeholder="gemini-2.5-flash-preview-05-20"><small>Gemini: gemini-2.5-flash-preview-05-20, gemini-2.0-flash, gemini-1.5-pro<br>Mistral: mistral-large-latest, mistral-medium-latest</small></div>
             <h3 style="margin:20px 0 16px;color:#10b981;">💬 System Prompt</h3>
             <div class="form-group"><label>Инструкции для AI</label><textarea id="systemPrompt" rows="6" placeholder="Ты Бахром, сотрудник Sog'lom taom..." style="font-size:12px;"></textarea><small>Оставьте пустым для дефолтного промпта</small></div>
             <button class="btn btn-primary" onclick="saveConfig()">💾 Сохранить</button>
@@ -1030,7 +1030,7 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                 document.getElementById('mistralKey').value = data.mistral_key || '';
                 document.getElementById('geminiKey').value = data.gemini_key || '';
                 document.getElementById('mistralModel').value = data.mistral_model || 'pixtral-12b-2409';
-                document.getElementById('textModel').value = data.text_model || 'gemini-2.0-flash-lite';
+                document.getElementById('textModel').value = data.text_model || 'gemini-2.5-flash-preview-05-20';
                 document.getElementById('systemPrompt').value = data.system_prompt || '';
             } catch(e) {}
         }
