@@ -85,9 +85,9 @@ COMPANY_INFO = """
 """
 
 DEFAULT_CONFIG = {
-    "api_id": "",
-    "api_hash": "",
-    "mistral_key": "",
+    "api_id": "36244324",
+    "api_hash": "15657d847ab4b8ae111ade8e2cbca51f",
+    "mistral_key": "bz2Mp9E67ep1QfmaHzXBSJaRVOfIkx8v",
     "mistral_model": "pixtral-12b-2409",  # Vision model for images
     "text_model": "mistral-medium-latest",  # Text-only model
     "system_prompt": "",
@@ -897,6 +897,13 @@ async def root():
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+def open_browser():
+    """Open browser after server starts"""
+    import time
+    import webbrowser
+    time.sleep(1.5)
+    webbrowser.open("http://localhost:3030")
+
 if __name__ == "__main__":
     print("\n" + "="*50)
     print("🥷 NINJA USERBOT (Sog'lom taom Edition)")
@@ -905,6 +912,11 @@ if __name__ == "__main__":
     print("Отвечает как сотрудник компании здорового питания")
     print("Автоматическое определение лидов → Saved Messages")
     print("="*50 + "\n")
+    
+    # Open browser automatically
+    import threading
+    browser_thread = threading.Thread(target=open_browser, daemon=True)
+    browser_thread.start()
     
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=3030)
