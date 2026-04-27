@@ -808,6 +808,7 @@ WEB_UI_HTML = '''<!DOCTYPE html>
             <div style="margin-bottom: 20px;">
                 <button id="startBtn" class="btn btn-primary" onclick="startBot()">▶ Запустить</button>
                 <button id="stopBtn" class="btn btn-danger" onclick="stopBot()" disabled>⏹ Остановить</button>
+                <button class="btn" onclick="refreshAll()" style="background:#374151;">🔄 Обновить</button>
             </div>
             <div class="logs" id="controlLogs"></div>
         </div>
@@ -1038,18 +1039,23 @@ WEB_UI_HTML = '''<!DOCTYPE html>
             return div.innerHTML; 
         }
 
+        function refreshAll() {
+            updateStatus();
+            loadLogs();
+            loadLeads();
+            checkAuth();
+        }
+
         document.getElementById('authInput').addEventListener('keypress', function(e) { 
             if (e.key === 'Enter') submitAuth(); 
         });
 
+        // Load once on start - NO periodic requests to avoid blocking
         loadConfig(); 
         updateStatus(); 
         loadLogs(); 
         loadLeads();
-        setInterval(updateStatus, 3000);
-        setInterval(loadLogs, 3000);
-        setInterval(loadLeads, 5000);
-        setInterval(checkAuth, 2000);
+        // setInterval removed - user can refresh manually
     </script>
 </body>
 </html>'''
