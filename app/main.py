@@ -3,6 +3,7 @@ Ninja Userbot - Telegram Auto-Reply with Mistral AI
 Runs as YOUR Telegram account (Userbot, not Bot)
 Supports images via Mistral Vision API
 Lead tracking to Saved Messages
+Web UI Authentication
 """
 
 import asyncio
@@ -18,11 +19,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import httpx
 from telethon import TelegramClient, events
-from telethon.tl.types import User, Photo, Document
+from telethon.tl.types import User
 from telethon.tl.types import MessageMediaPhoto
 
 # ---------------------------------------------------------------------------
@@ -88,13 +88,12 @@ DEFAULT_CONFIG = {
     "api_id": "36244324",
     "api_hash": "15657d847ab4b8ae111ade8e2cbca51f",
     "mistral_key": "bz2Mp9E67ep1QfmaHzXBSJaRVOfIkx8v",
-    "mistral_model": "pixtral-12b-2409",  # Vision model for images
-    "text_model": "mistral-medium-latest",  # Text-only model
+    "mistral_model": "pixtral-12b-2409",
+    "text_model": "mistral-medium-latest",
     "system_prompt": "",
     "lead_prompt": "",
 }
 
-# Default system prompt - realistic employee from Tashkent
 DEFAULT_SYSTEM_PROMPT = """Ты Бахром, 35-летний сотрудник компании Sog'lom taom (Соғлом таом) из Ташкента, Узбекистан. Ты работаешь в отделе доставки здорового питания и отвечаешь на сообщения клиентов в Telegram.
 
 О ТЕБЕ:
@@ -124,7 +123,6 @@ DEFAULT_SYSTEM_PROMPT = """Ты Бахром, 35-летний сотрудник
 ИНФОРМАЦИЯ О КОМПАНИИ (используй при ответах):
 """ + COMPANY_INFO
 
-# Lead detection prompt
 DEFAULT_LEAD_PROMPT = """Ты анализируешь переписку с клиентом и определяешь, является ли это успешным лидом.
 
 УСПЕШНЫЙ ЛИД - клиент который:
@@ -153,56 +151,51 @@ DEFAULT_LEAD_PROMPT = """Ты анализируешь переписку с к�
 Если не лид - верни is_lead: false и остальные поля пустыми.
 """
 
-# Conversation history per chat (supports multimodal content)
+# Global state
 HISTORY_LIMIT = 20
 conversation_history: dict[int, list[dict]] = {}
 message_logs: list = []
 leads_log: list = []
 
-# Bot state
-bot_instance = None
+# Bot instance and state
+client: Optional[TelegramClient] = None
+bot_running = False
+bot_username: Optional[str] = None
+message_count = 0
+lead_count = 0
+config: dict = {}
+
 auth_state = {
-    "step": "idle",  # idle, phone, code, password
+    "step": "idle",
     "phone": None,
-    "phone_code_hash": None
+    "phone_code_hash": None,
+    "error": None
 }
 
-# ---------------------------------------------------------------------------
-# Models
-# ---------------------------------------------------------------------------
-class ConfigModel(BaseModel):
-    api_id: str = ""
-    api_hash: str = ""
-    mistral_key: str = ""
-    mistral_model: str = "pixtral-12b-2409"
-    text_model: str = "mistral-medium-latest"
-    system_prompt: str = ""
-    lead_prompt: str = ""
+# Background task reference
+bot_task: Optional[asyncio.Task] = None
 
 # ---------------------------------------------------------------------------
 # Helper Functions
 # ---------------------------------------------------------------------------
 def load_config() -> dict:
-    config = DEFAULT_CONFIG.copy()
+    cfg = DEFAULT_CONFIG.copy()
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
-                config.update(loaded)
+                cfg.update(loaded)
         except:
             pass
-    
-    # Ensure prompts have defaults
-    if not config.get("system_prompt"):
-        config["system_prompt"] = DEFAULT_SYSTEM_PROMPT
-    if not config.get("lead_prompt"):
-        config["lead_prompt"] = DEFAULT_LEAD_PROMPT
-    
-    return config
+    if not cfg.get("system_prompt"):
+        cfg["system_prompt"] = DEFAULT_SYSTEM_PROMPT
+    if not cfg.get("lead_prompt"):
+        cfg["lead_prompt"] = DEFAULT_LEAD_PROMPT
+    return cfg
 
-def save_config(config: dict) -> None:
+def save_config(cfg: dict) -> None:
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
 
 def load_logs() -> list:
     if LOGS_FILE.exists():
@@ -231,7 +224,6 @@ def save_leads() -> None:
         json.dump(leads_log[-200:], f, indent=2, ensure_ascii=False)
 
 def add_log(message: str, sender: str = "System", direction: str = "system", has_image: bool = False):
-    """Add log entry"""
     display_msg = message[:200] if len(message) > 200 else message
     if has_image:
         display_msg = "[IMAGE] " + display_msg
@@ -248,7 +240,6 @@ def add_log(message: str, sender: str = "System", direction: str = "system", has
     print(f"[{direction}] {sender}: {display_msg}")
 
 def add_lead(lead_data: dict, client_name: str, chat_id: int):
-    """Add lead to log"""
     entry = {
         "id": datetime.now().strftime("%Y%m%d%H%M%S%f"),
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -259,82 +250,49 @@ def add_lead(lead_data: dict, client_name: str, chat_id: int):
     leads_log.append(entry)
     save_leads()
 
-async def download_and_encode_image(client, message) -> Optional[str]:
-    """Download image from message and return base64 encoded data URL"""
+async def download_and_encode_image(msg) -> Optional[str]:
+    global client
     try:
-        if not message.media:
+        if not msg.media:
             return None
-        
-        # Handle photo
-        if isinstance(message.media, MessageMediaPhoto):
-            photo = message.media.photo
+        if isinstance(msg.media, MessageMediaPhoto):
+            photo = msg.media.photo
             if photo:
-                # Download the photo
                 file_path = await client.download_media(photo, IMAGES_DIR)
-                
-                # Read and encode
                 with open(file_path, "rb") as f:
                     image_data = f.read()
-                
-                # Determine mime type
                 ext = Path(file_path).suffix.lower()
-                mime_types = {
-                    '.jpg': 'image/jpeg',
-                    '.jpeg': 'image/jpeg',
-                    '.png': 'image/png',
-                    '.gif': 'image/gif',
-                    '.webp': 'image/webp'
-                }
+                mime_types = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp'}
                 mime_type = mime_types.get(ext, 'image/jpeg')
-                
-                # Create data URL
                 base64_data = base64.b64encode(image_data).decode('utf-8')
                 data_url = f"data:{mime_type};base64,{base64_data}"
-                
-                # Cleanup temp file
                 try:
                     os.remove(file_path)
                 except:
                     pass
-                
                 return data_url
-        
         return None
     except Exception as e:
         print(f"Error downloading image: {e}")
         return None
 
 async def call_mistral_vision(messages: list[dict], api_key: str, model: str) -> str:
-    """Call Mistral AI with vision support for multimodal messages"""
     url = "https://api.mistral.ai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    
-    payload = {
-        "model": model,
-        "messages": messages,
-        "temperature": 0.7,
-        "max_tokens": 1000
-    }
-    
-    async with httpx.AsyncClient(timeout=120) as client:
-        r = await client.post(url, headers=headers, json=payload)
+    payload = {"model": model, "messages": messages, "temperature": 0.7, "max_tokens": 1000}
+    async with httpx.AsyncClient(timeout=120) as http_client:
+        r = await http_client.post(url, headers=headers, json=payload)
         if r.status_code != 200:
-            error_detail = r.text
-            raise Exception(f"API Error {r.status_code}: {error_detail}")
+            raise Exception(f"API Error {r.status_code}: {r.text}")
         return r.json()["choices"][0]["message"]["content"].strip()
 
 async def analyze_lead(conversation: list[dict], api_key: str, model: str) -> dict:
-    """Analyze conversation to detect if it's a successful lead"""
     try:
         messages = [
             {"role": "system", "content": DEFAULT_LEAD_PROMPT},
             {"role": "user", "content": f"Проанализируй переписку:\n\n{json.dumps(conversation, ensure_ascii=False, indent=2)}"}
         ]
-        
         result = await call_mistral_vision(messages, api_key, model)
-        
-        # Parse JSON from response
-        # Find JSON in response
         import re
         json_match = re.search(r'\{[^{}]*\}', result, re.DOTALL)
         if json_match:
@@ -345,44 +303,27 @@ async def analyze_lead(conversation: list[dict], api_key: str, model: str) -> di
         return {"is_lead": False}
 
 def add_to_history(chat_id: int, role: str, content: Union[str, list]) -> None:
-    """Add message to conversation history (supports text or multimodal content)"""
     if chat_id not in conversation_history:
         conversation_history[chat_id] = []
-    
     conversation_history[chat_id].append({"role": role, "content": content})
-    
-    # Keep only last N messages
     if len(conversation_history[chat_id]) > HISTORY_LIMIT:
         conversation_history[chat_id] = conversation_history[chat_id][-HISTORY_LIMIT:]
 
 def get_conversation_messages(chat_id: int, system_prompt: str) -> list[dict]:
-    """Build messages list with full conversation context"""
     messages = [{"role": "system", "content": system_prompt}]
-    
     if chat_id in conversation_history:
         messages.extend(conversation_history[chat_id])
-    
     return messages
 
 # ---------------------------------------------------------------------------
-# Telegram Userbot
+# Telegram Bot Logic
 # ---------------------------------------------------------------------------
-class TelegramUserbot:
-    def __init__(self):
-        self.client: Optional[TelegramClient] = None
-        self.running = False
-        self.config = load_config()
-        self.username: Optional[str] = None
-        self.message_count = 0
-        self.lead_count = 0
-
-    async def send_to_saved_messages(self, lead_data: dict, client_name: str, chat_id: int):
-        """Send lead notification to Saved Messages"""
-        try:
-            urgency_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}
-            emoji = urgency_emoji.get(lead_data.get("urgency", "medium"), "🟡")
-            
-            message = f"""{emoji} НОВЫЙ ЛИД!
+async def send_to_saved_messages(lead_data: dict, client_name: str, chat_id: int):
+    global client
+    try:
+        urgency_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}
+        emoji = urgency_emoji.get(lead_data.get("urgency", "medium"), "🟡")
+        message = f"""{emoji} НОВЫЙ ЛИД!
 
 👤 Клиент: {client_name}
 📱 Chat ID: {chat_id}
@@ -396,250 +337,185 @@ class TelegramUserbot:
 
 🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}
 """
-            
-            # Send to Saved Messages (chat with self)
-            me = await self.client.get_me()
-            await self.client.send_message(me.id, message)
-            add_log(f"Лид сохранён: {client_name}", "System", "lead")
-            
-        except Exception as e:
-            add_log(f"Ошибка сохранения лида: {e}", "System", "error")
+        me = await client.get_me()
+        await client.send_message(me.id, message)
+        add_log(f"Лид сохранён: {client_name}", "System", "lead")
+    except Exception as e:
+        add_log(f"Ошибка сохранения лида: {e}", "System", "error")
 
-    async def handle_message(self, chat_id: int, sender: User, message) -> None:
-        """Handle incoming message (text and/or images) and generate AI reply"""
-        sender_name = sender.first_name or sender.last_name or str(sender.id)
-        
-        text = (message.text or "").strip()
-        has_image = False
-        image_url = None
-        
-        # Check for image
-        if message.media:
-            image_url = await download_and_encode_image(self.client, message)
-            if image_url:
-                has_image = True
-        
-        # Skip if no text and no image
-        if not text and not has_image:
+async def handle_message(chat_id: int, sender: User, message):
+    global client, config, message_count, lead_count
+    sender_name = sender.first_name or sender.last_name or str(sender.id)
+    text = (message.text or "").strip()
+    has_image = False
+    image_url = None
+
+    if message.media:
+        image_url = await download_and_encode_image(message)
+        if image_url:
+            has_image = True
+
+    if not text and not has_image:
+        return
+
+    add_log(text if text else "(изображение)", sender_name, "incoming", has_image)
+
+    if has_image:
+        content = []
+        if text:
+            content.append({"type": "text", "text": text})
+        content.append({"type": "image_url", "image_url": {"url": image_url}})
+        add_to_history(chat_id, "user", content)
+    else:
+        add_to_history(chat_id, "user", text)
+
+    try:
+        async with client.action(chat_id, "typing"):
+            add_log("Думаю...", "System", "system")
+            messages = get_conversation_messages(chat_id, config.get("system_prompt", DEFAULT_SYSTEM_PROMPT))
+            model = config["mistral_model"] if has_image else config.get("text_model", config["mistral_model"])
+            reply = await call_mistral_vision(messages, config["mistral_key"], model)
+    except Exception as e:
+        add_log(f"AI Error: {e}", "System", "error")
+        return
+
+    try:
+        add_to_history(chat_id, "assistant", reply)
+        await client.send_message(chat_id, reply)
+        message_count += 1
+        add_log(reply, sender_name, "outgoing")
+
+        msg_count = len(conversation_history.get(chat_id, []))
+        if msg_count >= 3 and msg_count % 3 == 0:
+            try:
+                conv_for_analysis = []
+                for msg in conversation_history.get(chat_id, []):
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        text_parts = [item.get("text", "") for item in content if item.get("type") == "text"]
+                        conv_for_analysis.append({"role": msg["role"], "content": " ".join(text_parts) + " [изображение]"})
+                    else:
+                        conv_for_analysis.append(msg)
+
+                lead_result = await analyze_lead(conv_for_analysis, config["mistral_key"], config.get("text_model", config["mistral_model"]))
+                if lead_result.get("is_lead") and lead_result.get("confidence", 0) >= 0.6:
+                    add_lead(lead_result, sender_name, chat_id)
+                    lead_count += 1
+                    await send_to_saved_messages(lead_result, sender_name, chat_id)
+            except Exception as e:
+                print(f"Lead analysis error: {e}")
+    except Exception as e:
+        add_log(f"Send Error: {e}", "System", "error")
+
+async def run_bot():
+    global client, bot_running, bot_username, message_count, lead_count, config, auth_state, bot_task
+    
+    try:
+        if not config.get("api_id") or not config.get("api_hash"):
+            add_log("ОШИБКА: Настройте API ID и API Hash", "System", "error")
             return
-        
-        # Log incoming message
-        add_log(text if text else "(изображение)", sender_name, "incoming", has_image)
-        
-        # Build content for history
-        if has_image:
-            # Multimodal content with image
-            content = []
-            if text:
-                content.append({"type": "text", "text": text})
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": image_url}
-            })
-            add_to_history(chat_id, "user", content)
-        else:
-            # Text only
-            add_to_history(chat_id, "user", text)
-        
-        try:
-            # Show typing indicator
-            async with self.client.action(chat_id, "typing"):
-                add_log("Думаю...", "System", "system")
-                
-                messages = get_conversation_messages(chat_id, self.config.get("system_prompt", DEFAULT_SYSTEM_PROMPT))
-                
-                # Use vision model if images present
-                model = self.config["mistral_model"] if has_image else self.config.get("text_model", self.config["mistral_model"])
-                
-                reply = await call_mistral_vision(
-                    messages,
-                    self.config["mistral_key"],
-                    model
-                )
-        except Exception as e:
-            add_log(f"AI Error: {e}", "System", "error")
-            return
-        
-        try:
-            # Add AI response to history
-            add_to_history(chat_id, "assistant", reply)
-            
-            # Send the reply
-            await self.client.send_message(chat_id, reply)
-            self.message_count += 1
-            
-            # Log outgoing message
-            add_log(reply, sender_name, "outgoing")
-            
-            # Analyze if this is a successful lead (every 3 messages to save API calls)
-            msg_count = len(conversation_history.get(chat_id, []))
-            if msg_count >= 3 and msg_count % 3 == 0:
-                try:
-                    # Prepare conversation for analysis (convert multimodal to text for analysis)
-                    conv_for_analysis = []
-                    for msg in conversation_history.get(chat_id, []):
-                        content = msg.get("content", "")
-                        if isinstance(content, list):
-                            # Extract text from multimodal
-                            text_parts = [item.get("text", "") for item in content if item.get("type") == "text"]
-                            conv_for_analysis.append({
-                                "role": msg["role"],
-                                "content": " ".join(text_parts) + " [изображение]"
-                            })
-                        else:
-                            conv_for_analysis.append(msg)
-                    
-                    lead_result = await analyze_lead(
-                        conv_for_analysis,
-                        self.config["mistral_key"],
-                        self.config.get("text_model", self.config["mistral_model"])
-                    )
-                    
-                    if lead_result.get("is_lead") and lead_result.get("confidence", 0) >= 0.6:
-                        # Save lead
-                        add_lead(lead_result, sender_name, chat_id)
-                        self.lead_count += 1
-                        
-                        # Send to Saved Messages
-                        await self.send_to_saved_messages(lead_result, sender_name, chat_id)
-                        
-                except Exception as e:
-                    print(f"Lead analysis error: {e}")
-                    
-        except Exception as e:
-            add_log(f"Send Error: {e}", "System", "error")
 
-    async def fetch_chat_history(self, chat_id: int, limit: int = 20) -> list:
-        """Fetch last N messages from chat including images"""
-        messages = []
-        try:
-            async for msg in self.client.iter_messages(chat_id, limit=limit):
-                msg_data = {
-                    "id": msg.id,
-                    "text": msg.text or "",
-                    "date": msg.date.isoformat() if msg.date else None,
-                    "out": msg.out,
-                    "has_media": bool(msg.media),
-                    "sender_id": msg.sender_id
-                }
-                messages.append(msg_data)
-            return messages
-        except Exception as e:
-            add_log(f"Error fetching history: {e}", "System", "error")
-            return []
+        client = TelegramClient(str(SESSION_PATH), int(config["api_id"]), config["api_hash"])
 
-    async def run(self):
-        """Main userbot loop"""
-        global auth_state
-        try:
-            # Validate config
-            if not self.config.get("api_id") or not self.config.get("api_hash"):
-                add_log("ОШИБКА: Настройте API ID и API Hash в Settings", "System", "error")
+        @client.on(events.NewMessage)
+        async def handler(event):
+            global bot_running
+            if not bot_running:
                 return
-            
-            # Create Telegram client
-            self.client = TelegramClient(
-                str(SESSION_PATH),
-                int(self.config["api_id"]),
-                self.config["api_hash"]
-            )
-
-            @self.client.on(events.NewMessage)
-            async def handler(event):
-                # Only handle private messages, not from self, not from bots
-                if event.message.out or not event.is_private:
-                    return
-                
-                sender = await event.get_sender()
-                if not isinstance(sender, User) or sender.is_self or getattr(sender, 'bot', False):
-                    return
-                
-                # Handle message (text and/or images)
-                await self.handle_message(event.chat_id, sender, event.message)
-
-            # Connect to Telegram
-            add_log("Подключение к Telegram...", "System", "system")
-            await self.client.connect()
-            
-            # Check if already authorized
-            if await self.client.is_user_authorized():
-                me = await self.client.get_me()
-                self.username = f"@{me.username}" if me.username else me.first_name
-                self.running = True
-                add_log(f"✅ Вошел как {self.username}", "System", "success")
-            else:
-                # Need to authenticate via web UI
-                auth_state["step"] = "phone"
-                add_log("📱 Введите номер телефона в Web UI", "System", "system")
+            if event.message.out or not event.is_private:
                 return
-            
+            sender = await event.get_sender()
+            if not isinstance(sender, User) or sender.is_self or getattr(sender, 'bot', False):
+                return
+            await handle_message(event.chat_id, sender, event.message)
+
+        add_log("Подключение к Telegram...", "System", "system")
+        await client.connect()
+
+        if await client.is_user_authorized():
+            me = await client.get_me()
+            bot_username = f"@{me.username}" if me.username else me.first_name
+            bot_running = True
+            auth_state["step"] = "done"
+            add_log(f"✅ Вошел как {bot_username}", "System", "success")
+
             # Process unread messages
             add_log("Проверка непрочитанных сообщений...", "System", "system")
             unread_count = 0
-            
-            async for dialog in self.client.iter_dialogs(limit=100):
+            async for dialog in client.iter_dialogs(limit=100):
                 try:
                     entity = dialog.entity
-                    
                     if not isinstance(entity, User):
                         continue
                     if entity.is_self or getattr(entity, 'bot', False):
                         continue
-                    
                     sender_name = entity.first_name or entity.last_name or str(entity.id)
-                    
                     if dialog.unread_count > 0:
                         add_log(f"{dialog.unread_count} сообщений от {sender_name}", "System", "system")
-                        
-                        async for message in self.client.iter_messages(
-                            dialog.entity,
-                            limit=dialog.unread_count,
-                            reverse=True
-                        ):
+                        async for message in client.iter_messages(dialog.entity, limit=dialog.unread_count, reverse=True):
                             if not message.out:
-                                # Handle message with possible images
-                                await self.handle_message(dialog.id, entity, message)
+                                await handle_message(dialog.id, entity, message)
                                 unread_count += 1
-                        
-                        await self.client.send_read_acknowledge(dialog.entity)
+                        await client.send_read_acknowledge(dialog.entity)
                 except Exception as e:
                     add_log(f"Ошибка: {e}", "System", "error")
-            
+
             if unread_count > 0:
                 add_log(f"Обработано {unread_count} сообщений", "System", "success")
-            
             add_log("🚀 Юзербот работает! Отвечаю как сотрудник Sog'lom taom...", "System", "success")
-            
-            # Keep running
-            await self.client.run_until_disconnected()
-            
-        except Exception as e:
-            add_log(f"Ошибка: {e}", "System", "error")
-            self.running = False
 
-    async def start(self):
-        """Start the userbot"""
-        if self.running:
-            return
-        add_log("Запуск юзербота...", "System", "system")
-        await self.run()
+            # Keep running until disconnected
+            await client.run_until_disconnected()
+        else:
+            auth_state["step"] = "phone"
+            auth_state["error"] = None
+            add_log("📱 Требуется авторизация. Введите номер телефона в Web UI", "System", "system")
 
-    async def stop(self):
-        """Stop the userbot"""
-        if self.client:
-            await self.client.disconnect()
-        self.running = False
-        add_log("Юзербот остановлен", "System", "info")
+    except Exception as e:
+        add_log(f"Ошибка: {e}", "System", "error")
+        bot_running = False
 
+async def start_bot():
+    global bot_running, bot_task, config
+    if bot_running:
+        return
+    config = load_config()
+    bot_task = asyncio.create_task(run_bot())
+
+async def stop_bot():
+    global client, bot_running
+    bot_running = False
+    if client:
+        await client.disconnect()
+    add_log("Юзербот остановлен", "System", "info")
+
+# ---------------------------------------------------------------------------
+# Models
+# ---------------------------------------------------------------------------
+class ConfigModel(BaseModel):
+    api_id: str = ""
+    api_hash: str = ""
+    mistral_key: str = ""
+    mistral_model: str = "pixtral-12b-2409"
+    text_model: str = "mistral-medium-latest"
+    system_prompt: str = ""
+    lead_prompt: str = ""
+
+class PhoneModel(BaseModel):
+    phone: str
+
+class CodeModel(BaseModel):
+    code: str
 
 # ---------------------------------------------------------------------------
 # FastAPI App
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global message_logs, leads_log
+    global message_logs, leads_log, config
     message_logs = load_logs()
     leads_log = load_leads()
+    config = load_config()
     yield
 
 app = FastAPI(title="Ninja Userbot API", lifespan=lifespan)
@@ -657,133 +533,143 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 @app.get("/api/status")
 async def get_status():
-    global bot_instance
-    if bot_instance is None:
-        return {"running": False, "username": None, "message_count": 0, "lead_count": 0}
     return {
-        "running": bot_instance.running,
-        "username": bot_instance.username,
-        "message_count": bot_instance.message_count,
-        "lead_count": bot_instance.lead_count
+        "running": bot_running,
+        "username": bot_username,
+        "message_count": message_count,
+        "lead_count": lead_count
     }
 
 @app.get("/api/config")
 async def get_config():
-    return load_config()
+    return config
 
 @app.post("/api/config")
-async def update_config(config: ConfigModel):
-    global bot_instance
-    save_config(config.model_dump())
-    if bot_instance:
-        bot_instance.config = load_config()
+async def update_config(cfg: ConfigModel):
+    global config
+    save_config(cfg.model_dump())
+    config = load_config()
     add_log("Настройки сохранены", "System", "system")
     return {"success": True}
 
 @app.post("/api/start")
-async def start_bot():
-    global bot_instance
-    import threading
-    
-    if bot_instance is None:
-        bot_instance = TelegramUserbot()
-    
-    if bot_instance.running:
-        return {"success": True, "message": "Already running"}
-    
-    def run_in_thread():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(bot_instance.start())
-        finally:
-            loop.close()
-    
-    thread = threading.Thread(target=run_in_thread, daemon=True)
-    thread.start()
-    
+async def api_start_bot():
+    await start_bot()
     return {"success": True, "message": "Starting..."}
 
 @app.post("/api/stop")
-async def stop_bot():
-    global bot_instance
-    if bot_instance:
-        await bot_instance.stop()
+async def api_stop_bot():
+    await stop_bot()
     return {"success": True}
 
 @app.get("/api/auth/status")
 async def get_auth_status():
-    """Get authentication status"""
-    global auth_state, bot_instance
     return {
         "step": auth_state["step"],
-        "running": bot_instance.running if bot_instance else False
+        "error": auth_state.get("error"),
+        "running": bot_running
     }
-
-class PhoneModel(BaseModel):
-    phone: str
-
-class CodeModel(BaseModel):
-    code: str
 
 @app.post("/api/auth/phone")
 async def send_phone(data: PhoneModel):
-    """Send phone number for authentication"""
-    global auth_state, bot_instance
-
-    if bot_instance is None or bot_instance.client is None:
-        return {"success": False, "error": "Bot not initialized"}
+    global client, auth_state
+    
+    if client is None:
+        # Need to initialize client first
+        if not config.get("api_id") or not config.get("api_hash"):
+            return {"success": False, "error": "Настройте API ID и API Hash"}
+        client = TelegramClient(str(SESSION_PATH), int(config["api_id"]), config["api_hash"])
+        await client.connect()
 
     try:
-        result = await bot_instance.client.send_code_request(data.phone)
+        result = await client.send_code_request(data.phone)
         auth_state["phone"] = data.phone
         auth_state["phone_code_hash"] = result.phone_code_hash
         auth_state["step"] = "code"
+        auth_state["error"] = None
         add_log(f"📱 Код отправлен на {data.phone}", "System", "system")
         return {"success": True, "message": "Code sent"}
     except Exception as e:
+        auth_state["error"] = str(e)
         add_log(f"Ошибка отправки кода: {e}", "System", "error")
         return {"success": False, "error": str(e)}
 
 @app.post("/api/auth/code")
 async def send_code(data: CodeModel):
-    """Send verification code"""
-    global auth_state, bot_instance
-
-    if bot_instance is None or bot_instance.client is None:
-        return {"success": False, "error": "Bot not initialized"}
+    global client, auth_state, bot_running, bot_username
+    
+    if client is None:
+        return {"success": False, "error": "Client not initialized"}
 
     try:
-        await bot_instance.client.sign_in(
+        await client.sign_in(
             auth_state["phone"],
             data.code,
             phone_code_hash=auth_state["phone_code_hash"]
         )
 
-        # Success!
-        me = await bot_instance.client.get_me()
-        bot_instance.username = f"@{me.username}" if me.username else me.first_name
-        bot_instance.running = True
+        me = await client.get_me()
+        bot_username = f"@{me.username}" if me.username else me.first_name
+        bot_running = True
         auth_state["step"] = "done"
+        auth_state["error"] = None
 
-        add_log(f"✅ Вошел как {bot_instance.username}", "System", "success")
+        add_log(f"✅ Вошел как {bot_username}", "System", "success")
 
-        # Start message handler
-        @bot_instance.client.on(events.NewMessage)
+        # Register message handler
+        @client.on(events.NewMessage)
         async def handler(event):
+            global bot_running
+            if not bot_running:
+                return
             if event.message.out or not event.is_private:
                 return
             sender = await event.get_sender()
             if not isinstance(sender, User) or sender.is_self or getattr(sender, 'bot', False):
                 return
-            await bot_instance.handle_message(event.chat_id, sender, event.message)
+            await handle_message(event.chat_id, sender, event.message)
 
         add_log("🚀 Юзербот работает!", "System", "success")
 
-        return {"success": True, "username": bot_instance.username}
+        # Process unread messages
+        asyncio.create_task(process_unread_messages())
+
+        return {"success": True, "username": bot_username}
     except Exception as e:
+        auth_state["error"] = str(e)
         add_log(f"Ошибка входа: {e}", "System", "error")
         return {"success": False, "error": str(e)}
+
+async def process_unread_messages():
+    global client, bot_running
+    if not client or not bot_running:
+        return
+    
+    add_log("Проверка непрочитанных сообщений...", "System", "system")
+    unread_count = 0
+    try:
+        async for dialog in client.iter_dialogs(limit=100):
+            try:
+                entity = dialog.entity
+                if not isinstance(entity, User):
+                    continue
+                if entity.is_self or getattr(entity, 'bot', False):
+                    continue
+                sender_name = entity.first_name or entity.last_name or str(entity.id)
+                if dialog.unread_count > 0:
+                    add_log(f"{dialog.unread_count} сообщений от {sender_name}", "System", "system")
+                    async for message in client.iter_messages(dialog.entity, limit=dialog.unread_count, reverse=True):
+                        if not message.out:
+                            await handle_message(dialog.id, entity, message)
+                            unread_count += 1
+                    await client.send_read_acknowledge(dialog.entity)
+            except Exception as e:
+                add_log(f"Ошибка: {e}", "System", "error")
+
+        if unread_count > 0:
+            add_log(f"Обработано {unread_count} сообщений", "System", "success")
+    except Exception as e:
+        add_log(f"Ошибка обработки: {e}", "System", "error")
 
 @app.get("/api/logs")
 async def get_logs():
@@ -798,7 +684,6 @@ async def clear_logs():
 
 @app.get("/api/leads")
 async def get_leads():
-    """Get all leads"""
     return leads_log[-50:]
 
 @app.delete("/api/leads")
@@ -807,23 +692,6 @@ async def clear_leads():
     leads_log = []
     save_leads()
     return {"success": True}
-
-@app.get("/api/history/{chat_id}")
-async def get_chat_history(chat_id: int, limit: int = 20):
-    """Get last N messages from a specific chat"""
-    global bot_instance
-    if bot_instance is None or not bot_instance.running:
-        return {"error": "Bot not running"}
-    
-    history = await bot_instance.fetch_chat_history(chat_id, limit)
-    return {"chat_id": chat_id, "messages": history}
-
-@app.get("/api/conversation/{chat_id}")
-async def get_conversation_history(chat_id: int):
-    """Get conversation history stored in memory"""
-    if chat_id in conversation_history:
-        return {"chat_id": chat_id, "history": conversation_history[chat_id]}
-    return {"chat_id": chat_id, "history": []}
 
 # ---------------------------------------------------------------------------
 # Web UI (embedded)
@@ -848,7 +716,6 @@ WEB_UI_HTML = '''<!DOCTYPE html>
         .stat-card .value { font-size: 20px; font-weight: bold; color: #10b981; }
         .stat-card .label { color: #9ca3af; font-size: 12px; margin-top: 4px; }
         .stat-card.highlight { background: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.3); }
-        .stat-card.highlight .value { color: #34d399; }
         .tabs { display: flex; gap: 6px; margin-bottom: 20px; flex-wrap: wrap; }
         .tab { padding: 10px 20px; background: rgba(255,255,255,0.05); border: none; color: #9ca3af; cursor: pointer; border-radius: 8px; font-size: 14px; transition: all 0.2s; }
         .tab.active { background: #10b981; color: #fff; }
@@ -974,7 +841,12 @@ WEB_UI_HTML = '''<!DOCTYPE html>
         const API = window.location.origin + '/api';
         let authStep = 'idle';
 
-        function showTab(name) { document.querySelectorAll('.tab').forEach(t => t.classList.remove('active')); document.querySelectorAll('.panel').forEach(t => t.classList.remove('active')); event.target.classList.add('active'); document.getElementById('tab-' + name).classList.add('active'); }
+        function showTab(name) { 
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active')); 
+            document.querySelectorAll('.panel').forEach(t => t.classList.remove('active')); 
+            event.target.classList.add('active'); 
+            document.getElementById('tab-' + name).classList.add('active'); 
+        }
 
         async function updateStatus() {
             try {
@@ -1004,13 +876,13 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                     document.getElementById('authTitle').textContent = '📱 Введите номер телефона';
                     document.getElementById('authInput').placeholder = '+998901234567';
                     document.getElementById('authInput').value = '';
-                    document.getElementById('authError').textContent = '';
+                    document.getElementById('authError').textContent = data.error || '';
                 } else if (authStep === 'code') {
                     document.getElementById('authModal').classList.add('show');
                     document.getElementById('authTitle').textContent = '🔢 Введите код из Telegram';
                     document.getElementById('authInput').placeholder = '12345';
                     document.getElementById('authInput').value = '';
-                    document.getElementById('authError').textContent = '';
+                    document.getElementById('authError').textContent = data.error || '';
                 } else if (authStep === 'done' || data.running) {
                     document.getElementById('authModal').classList.remove('show');
                 }
@@ -1064,22 +936,116 @@ WEB_UI_HTML = '''<!DOCTYPE html>
             }
         }
 
-        async function loadConfig() { try { const res = await fetch(`${API}/config`); const data = await res.json(); document.getElementById('apiId').value = data.api_id || ''; document.getElementById('apiHash').value = data.api_hash || ''; document.getElementById('mistralKey').value = data.mistral_key || ''; document.getElementById('mistralModel').value = data.mistral_model || 'pixtral-12b-2409'; document.getElementById('textModel').value = data.text_model || 'mistral-medium-latest'; document.getElementById('systemPrompt').value = data.system_prompt || ''; } catch(e) {} }
-        async function saveConfig() { const config = { api_id: document.getElementById('apiId').value, api_hash: document.getElementById('apiHash').value, mistral_key: document.getElementById('mistralKey').value, mistral_model: document.getElementById('mistralModel').value, text_model: document.getElementById('textModel').value, system_prompt: document.getElementById('systemPrompt').value }; try { await fetch(`${API}/config`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(config) }); alert('✅ Сохранено!'); loadLogs(); } catch(e) { alert('❌ Ошибка: ' + e); } }
-        async function startBot() { try { await fetch(`${API}/start`, {method: 'POST'}); setTimeout(checkAuth, 2000); updateStatus(); loadLogs(); } catch(e) {} }
-        async function stopBot() { try { await fetch(`${API}/stop`, {method: 'POST'}); updateStatus(); } catch(e) {} }
-        async function loadLogs() { try { const res = await fetch(`${API}/logs`); const logs = await res.json(); const html = renderLogs(logs); document.getElementById('logsList').innerHTML = html; document.getElementById('controlLogs').innerHTML = html; } catch(e) {} }
-        async function clearLogs() { try { await fetch(`${API}/logs`, {method: 'DELETE'}); loadLogs(); } catch(e) {} }
-        async function loadLeads() { try { const res = await fetch(`${API}/leads`); const leads = await res.json(); document.getElementById('leadsList').innerHTML = renderLeads(leads); } catch(e) {} }
-        async function clearLeads() { try { await fetch(`${API}/leads`, {method: 'DELETE'}); loadLeads(); updateStatus(); } catch(e) {} }
-        function renderLogs(logs) { if (!logs || logs.length === 0) return '<p style="color:#6b7280;text-align:center;padding:20px;">Нет записей</p>'; return logs.slice().reverse().map(log => { const imageIcon = log.has_image ? '<span class="log-image">🖼️</span> ' : ''; return `<div class="log-entry log-${log.direction}"><span class="log-time">${log.timestamp}</span><span class="log-sender">${log.sender}</span><span class="log-message">${imageIcon}${escapeHtml(log.message)}</span></div>`; }).join(''); }
-        function renderLeads(leads) { if (!leads || leads.length === 0) return '<p style="color:#6b7280;text-align:center;padding:20px;">Нет лидов</p>'; return leads.slice().reverse().map(lead => { const urgencyClass = `urgency-${lead.urgency || 'medium'}`; return `<div class="lead-card"><div class="lead-header"><span class="lead-client">👤 ${lead.client_name || 'Клиент'}</span><span class="lead-type">${lead.lead_type || 'new_client'}</span></div><div class="lead-summary">${lead.summary || ''}</div><div class="lead-meta"><span>📊 ${((lead.confidence || 0.5) * 100).toFixed(0)}%</span><span class="${urgencyClass}">⚡ ${lead.urgency || 'medium'}</span><span>🕐 ${lead.timestamp || ''}</span></div></div>`; }).join(''); }
-        function escapeHtml(text) { const div = document.createElement('div'); div.textContent = text; return div.innerHTML; }
+        async function loadConfig() { 
+            try { 
+                const res = await fetch(`${API}/config`); 
+                const data = await res.json(); 
+                document.getElementById('apiId').value = data.api_id || ''; 
+                document.getElementById('apiHash').value = data.api_hash || ''; 
+                document.getElementById('mistralKey').value = data.mistral_key || ''; 
+                document.getElementById('mistralModel').value = data.mistral_model || 'pixtral-12b-2409'; 
+                document.getElementById('textModel').value = data.text_model || 'mistral-medium-latest'; 
+                document.getElementById('systemPrompt').value = data.system_prompt || ''; 
+            } catch(e) {} 
+        }
+        
+        async function saveConfig() { 
+            const cfg = { 
+                api_id: document.getElementById('apiId').value, 
+                api_hash: document.getElementById('apiHash').value, 
+                mistral_key: document.getElementById('mistralKey').value, 
+                mistral_model: document.getElementById('mistralModel').value, 
+                text_model: document.getElementById('textModel').value, 
+                system_prompt: document.getElementById('systemPrompt').value 
+            }; 
+            try { 
+                await fetch(`${API}/config`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(cfg) }); 
+                alert('✅ Сохранено!'); 
+                loadLogs(); 
+            } catch(e) { 
+                alert('❌ Ошибка: ' + e); 
+            } 
+        }
+        
+        async function startBot() { 
+            try { 
+                await fetch(`${API}/start`, {method: 'POST'}); 
+                setTimeout(checkAuth, 1500); 
+                updateStatus(); 
+                loadLogs(); 
+            } catch(e) {} 
+        }
+        
+        async function stopBot() { 
+            try { 
+                await fetch(`${API}/stop`, {method: 'POST'}); 
+                updateStatus(); 
+            } catch(e) {} 
+        }
+        
+        async function loadLogs() { 
+            try { 
+                const res = await fetch(`${API}/logs`); 
+                const logs = await res.json(); 
+                const html = renderLogs(logs); 
+                document.getElementById('logsList').innerHTML = html; 
+                document.getElementById('controlLogs').innerHTML = html; 
+            } catch(e) {} 
+        }
+        
+        async function clearLogs() { 
+            try { 
+                await fetch(`${API}/logs`, {method: 'DELETE'}); 
+                loadLogs(); 
+            } catch(e) {} 
+        }
+        
+        async function loadLeads() { 
+            try { 
+                const res = await fetch(`${API}/leads`); 
+                const leads = await res.json(); 
+                document.getElementById('leadsList').innerHTML = renderLeads(leads); 
+            } catch(e) {} 
+        }
+        
+        async function clearLeads() { 
+            try { 
+                await fetch(`${API}/leads`, {method: 'DELETE'}); 
+                loadLeads(); 
+                updateStatus(); 
+            } catch(e) {} 
+        }
+        
+        function renderLogs(logs) { 
+            if (!logs || logs.length === 0) return '<p style="color:#6b7280;text-align:center;padding:20px;">Нет записей</p>'; 
+            return logs.slice().reverse().map(log => { 
+                const imageIcon = log.has_image ? '<span class="log-image">🖼️</span> ' : ''; 
+                return `<div class="log-entry log-${log.direction}"><span class="log-time">${log.timestamp}</span><span class="log-sender">${log.sender}</span><span class="log-message">${imageIcon}${escapeHtml(log.message)}</span></div>`; 
+            }).join(''); 
+        }
+        
+        function renderLeads(leads) { 
+            if (!leads || leads.length === 0) return '<p style="color:#6b7280;text-align:center;padding:20px;">Нет лидов</p>'; 
+            return leads.slice().reverse().map(lead => { 
+                const urgencyClass = `urgency-${lead.urgency || 'medium'}`; 
+                return `<div class="lead-card"><div class="lead-header"><span class="lead-client">👤 ${lead.client_name || 'Клиент'}</span><span class="lead-type">${lead.lead_type || 'new_client'}</span></div><div class="lead-summary">${lead.summary || ''}</div><div class="lead-meta"><span>📊 ${((lead.confidence || 0.5) * 100).toFixed(0)}%</span><span class="${urgencyClass}">⚡ ${lead.urgency || 'medium'}</span><span>🕐 ${lead.timestamp || ''}</span></div></div>`; 
+            }).join(''); 
+        }
+        
+        function escapeHtml(text) { 
+            const div = document.createElement('div'); 
+            div.textContent = text; 
+            return div.innerHTML; 
+        }
 
-        // Handle Enter key in auth input
-        document.getElementById('authInput').addEventListener('keypress', function(e) { if (e.key === 'Enter') submitAuth(); });
+        document.getElementById('authInput').addEventListener('keypress', function(e) { 
+            if (e.key === 'Enter') submitAuth(); 
+        });
 
-        loadConfig(); updateStatus(); loadLogs(); loadLeads();
+        loadConfig(); 
+        updateStatus(); 
+        loadLogs(); 
+        loadLeads();
         setInterval(updateStatus, 3000);
         setInterval(loadLogs, 3000);
         setInterval(loadLeads, 5000);
@@ -1090,14 +1056,12 @@ WEB_UI_HTML = '''<!DOCTYPE html>
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    """Serve embedded web UI"""
     return HTMLResponse(content=WEB_UI_HTML)
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def open_browser():
-    """Open browser after server starts"""
     import time
     import webbrowser
     time.sleep(1.5)
@@ -1110,9 +1074,9 @@ if __name__ == "__main__":
     print("Telegram Auto-Reply with Mistral AI + Vision")
     print("Отвечает как сотрудник компании здорового питания")
     print("Автоматическое определение лидов → Saved Messages")
+    print("Web UI для авторизации и настроек")
     print("="*50 + "\n")
     
-    # Open browser automatically
     import threading
     browser_thread = threading.Thread(target=open_browser, daemon=True)
     browser_thread.start()
