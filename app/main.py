@@ -89,7 +89,7 @@ DEFAULT_CONFIG = {
     "api_hash": "15657d847ab4b8ae111ade8e2cbca51f",
     "mistral_key": "bz2Mp9E67ep1QfmaHzXBSJaRVOfIkx8v",
     "mistral_model": "pixtral-12b-2409",
-    "text_model": "mistral-medium-latest",
+    "text_model": "mistral-large-latest",
     "system_prompt": "",
     "lead_prompt": "",
 }
@@ -826,7 +826,7 @@ WEB_UI_HTML = '''<!DOCTYPE html>
             <div class="form-group"><label>Mistral API Key</label><input type="password" id="mistralKey" placeholder="your-api-key"><small>Получить на console.mistral.ai</small></div>
             <div class="form-row">
                 <div class="form-group"><label>Vision Model</label><select id="mistralModel"><option value="pixtral-12b-2409">Pixtral 12B</option><option value="pixtral-large-latest">Pixtral Large</option></select></div>
-                <div class="form-group"><label>Text Model</label><select id="textModel"><option value="mistral-medium-latest">Mistral Medium</option><option value="mistral-small-latest">Mistral Small</option></select></div>
+                <div class="form-group"><label>Text Model</label><select id="textModel"><option value="mistral-large-latest">Mistral Large</option><option value="mistral-medium-latest">Mistral Medium</option><option value="mistral-small-latest">Mistral Small</option></select></div>
             </div>
             <h3 style="margin:20px 0 16px;color:#10b981;">💬 System Prompt</h3>
             <div class="form-group"><label>Инструкции для AI</label><textarea id="systemPrompt" rows="6" placeholder="Ты Бахром, сотрудник Sog'lom taom..." style="font-size:12px;"></textarea><small>Оставьте пустым для дефолтного промпта</small></div>
@@ -945,7 +945,7 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                 document.getElementById('apiHash').value = data.api_hash || ''; 
                 document.getElementById('mistralKey').value = data.mistral_key || ''; 
                 document.getElementById('mistralModel').value = data.mistral_model || 'pixtral-12b-2409'; 
-                document.getElementById('textModel').value = data.text_model || 'mistral-medium-latest'; 
+                document.getElementById('textModel').value = data.text_model || 'mistral-large-latest'; 
                 document.getElementById('systemPrompt').value = data.system_prompt || ''; 
             } catch(e) {} 
         }
