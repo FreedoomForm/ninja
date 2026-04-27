@@ -746,15 +746,49 @@ async def get_conversation_history(chat_id: int):
 # ---------------------------------------------------------------------------
 # Web UI
 # ---------------------------------------------------------------------------
-WEB_DIR = Path(__file__).parent / "web"
+# Try multiple possible locations for web directory
+def get_web_dir() -> Path:
+    possible_paths = [
+        Path(__file__).parent / "web",  # app/web
+        Path(__file__).parent.parent / "app" / "web",  # ninja/app/web
+        Path.cwd() / "app" / "web",  # from project root
+        Path.cwd() / "web",  # from app directory
+    ]
+    for p in possible_paths:
+        if (p / "index.html").exists():
+            return p
+    return Path(__file__).parent / "web"
+
+WEB_DIR = get_web_dir()
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
     """Serve web UI"""
     html_file = WEB_DIR / "index.html"
+    print(f"[DEBUG] Looking for web UI at: {html_file.absolute()}")
+    print(f"[DEBUG] Exists: {html_file.exists()}")
+    
     if html_file.exists():
         return HTMLResponse(content=html_file.read_text(encoding="utf-8"))
-    return HTMLResponse(content="<h1>Web UI not found</h1><p>Run from app directory</p>", status_code=404)
+    
+    # Return error with debug info
+    error_html = f"""
+    <html>
+    <head><title>Ninja Userbot - Setup</title></head>
+    <body style="background:#1a1a2e;color:#fff;font-family:sans-serif;padding:40px;">
+        <h1>🥷 Ninja Userbot</h1>
+        <h2 style="color:#f59e0b">Web UI not found</h2>
+        <p>Expected location: <code>{html_file.absolute()}</code></p>
+        <h3>How to fix:</h3>
+        <pre style="background:#000;padding:15px;border-radius:8px;">
+cd ninja/app
+python main.py
+        </pre>
+        <p>Then open: <a href="http://localhost:3030" style="color:#10b981">http://localhost:3030</a></p>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=error_html, status_code=404)
 
 # ---------------------------------------------------------------------------
 # Main
