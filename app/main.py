@@ -89,8 +89,9 @@ DEFAULT_CONFIG = {
     "api_hash": "15657d847ab4b8ae111ade8e2cbca51f",
     "mistral_key": "bz2Mp9E67ep1QfmaHzXBSJaRVOfIkx8v",
     "gemini_key": "AIzaSyB0TZA5Y3gB6ce-wJSnpeE3kz4wb18eBgc",
+    "ollama_url": "http://localhost:11434",
     "mistral_model": "pixtral-12b-2409",
-    "text_model": "gemini-2.5-flash-preview-05-20",
+    "text_model": "llama3.2",
     "system_prompt": "",
     "lead_prompt": "",
 }
@@ -346,10 +347,58 @@ def is_gemini_model(model: str) -> bool:
     """Check if model is Gemini"""
     return model.startswith("gemini")
 
+async def call_ollama(messages: list[dict], ollama_url: str, model: str = "llama3.2") -> str:
+    """Call Ollama API (local)"""
+    url = f"{ollama_url.rstrip('/')}/api/chat"
+
+    # Convert messages to Ollama format
+    ollama_messages = []
+    for msg in messages:
+        content = msg.get("content", "")
+        # Handle multimodal content (convert to text only for Ollama)
+        if isinstance(content, list):
+            text_parts = []
+            for item in content:
+                if item.get("type") == "text":
+                    text_parts.append(item["text"])
+                elif item.get("type") == "image_url":
+                    text_parts.append("[изображение]")
+            content = " ".join(text_parts)
+
+        ollama_messages.append({
+            "role": msg["role"],
+            "content": str(content)
+        })
+
+    payload = {
+        "model": model,
+        "messages": ollama_messages,
+        "stream": False
+    }
+
+    async with httpx.AsyncClient(timeout=120) as http_client:
+        r = await http_client.post(url, json=payload)
+        if r.status_code != 200:
+            raise Exception(f"Ollama API Error {r.status_code}: {r.text}")
+        return r.json()["message"]["content"].strip()
+
+async def describe_image_with_pixtral(image_url: str, mistral_key: str, model: str = "pixtral-12b-2409") -> str:
+    """Describe image using Pixtral vision model"""
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Опиши это изображение подробно на русском языке. Что на нём видно?"},
+                {"type": "image_url", "image_url": {"url": image_url}}
+            ]
+        }
+    ]
+    return await call_mistral_vision(messages, mistral_key, model)
+
 async def call_ai(messages: list[dict], cfg: dict, model: str = None) -> str:
     """Call appropriate AI based on model selection"""
     if model is None:
-        model = cfg.get("text_model", "gemini-2.5-flash-preview-05-20")
+        model = cfg.get("text_model", "llama3.2")
 
     # Add current date/time context
     now = datetime.now()
@@ -363,10 +412,56 @@ async def call_ai(messages: list[dict], cfg: dict, model: str = None) -> str:
             "content": messages_with_time[0]["content"] + time_context
         }
 
+    # Check if there are images in messages
+    has_image = False
+    image_url = None
+    for msg in messages_with_time:
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            for item in content:
+                if item.get("type") == "image_url":
+                    has_image = True
+                    image_url = item.get("image_url", {}).get("url", "")
+                    break
+        if has_image:
+            break
+
+    # If image exists, first describe it with Pixtral
+    if has_image and image_url:
+        # Describe image with Pixtral
+        image_description = await describe_image_with_pixtral(
+            image_url,
+            cfg.get("mistral_key", ""),
+            cfg.get("mistral_model", "pixtral-12b-2409")
+        )
+
+        # Replace image with description in messages
+        for msg in messages_with_time:
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                new_content = []
+                for item in content:
+                    if item.get("type") == "text":
+                        new_content.append(item)
+                    elif item.get("type") == "image_url":
+                        # Replace image with its description
+                        new_content.append({
+                            "type": "text",
+                            "text": f"\n[ИЗОБРАЖЕНИЕ: {image_description}]\n"
+                        })
+                msg["content"] = new_content
+
+    # Now call the text model
     if is_gemini_model(model):
+        # Gemini model
         return await call_gemini(messages_with_time, cfg.get("gemini_key", ""), model)
+    elif model.startswith("mistral:"):
+        # Mistral text model (format: mistral:mistral-large-latest)
+        model_name = model[8:]
+        return await call_mistral_vision(messages_with_time, cfg.get("mistral_key", ""), model_name)
     else:
-        return await call_mistral_vision(messages_with_time, cfg.get("mistral_key", ""), model)
+        # Default: Ollama (local)
+        return await call_ollama(messages_with_time, cfg.get("ollama_url", "http://localhost:11434"), model)
 
 async def analyze_lead(conversation: list[dict], cfg: dict, model: str) -> dict:
     try:
@@ -455,9 +550,8 @@ async def handle_message(chat_id: int, sender: User, message):
         async with client.action(chat_id, "typing"):
             add_log("Думаю...", "System", "system")
             messages = get_conversation_messages(chat_id, config.get("system_prompt", DEFAULT_SYSTEM_PROMPT))
-            # Use vision model for images, text model otherwise
-            model = config["mistral_model"] if has_image else config.get("text_model", "gemini-2.5-flash-preview-05-20")
-            reply = await call_ai(messages, config, model)
+            # call_ai handles image description with Pixtral automatically
+            reply = await call_ai(messages, config, config.get("text_model", "llama3.2"))
     except Exception as e:
         add_log(f"AI Error: {e}", "System", "error")
         return
@@ -480,7 +574,7 @@ async def handle_message(chat_id: int, sender: User, message):
                     else:
                         conv_for_analysis.append(msg)
 
-                lead_result = await analyze_lead(conv_for_analysis, config, config.get("text_model", "gemini-2.5-flash-preview-05-20"))
+                lead_result = await analyze_lead(conv_for_analysis, config, config.get("text_model", "llama3.2"))
                 if lead_result.get("is_lead") and lead_result.get("confidence", 0) >= 0.6:
                     add_lead(lead_result, sender_name, chat_id)
                     lead_count += 1
@@ -580,8 +674,9 @@ class ConfigModel(BaseModel):
     api_hash: str = ""
     mistral_key: str = ""
     gemini_key: str = ""
+    ollama_url: str = "http://localhost:11434"
     mistral_model: str = "pixtral-12b-2409"
-    text_model: str = "gemini-2.5-flash-preview-05-20"
+    text_model: str = "llama3.2"
     system_prompt: str = ""
     lead_prompt: str = ""
 
@@ -907,11 +1002,13 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                 <div class="form-group"><label>API Hash</label><input type="password" id="apiHash" placeholder="a1b2c3d4e5f6..."></div>
             </div>
             <h3 style="margin:20px 0 16px;color:#10b981;">🤖 Mistral AI (Vision)</h3>
-            <div class="form-group"><label>Mistral API Key</label><input type="password" id="mistralKey" placeholder="your-api-key"><small>Для изображений (Pixtral)</small></div>
+            <div class="form-group"><label>Mistral API Key</label><input type="password" id="mistralKey" placeholder="your-api-key"><small>Для изображений (Pixtral) - описывает картинки перед отправкой в текстовую модель</small></div>
             <div class="form-group"><label>Vision Model</label><select id="mistralModel"><option value="pixtral-12b-2409">Pixtral 12B</option><option value="pixtral-large-latest">Pixtral Large</option></select></div>
-            <h3 style="margin:20px 0 16px;color:#10b981;">✨ Google Gemini (Text)</h3>
-            <div class="form-group"><label>Gemini API Key</label><input type="password" id="geminiKey" placeholder="your-gemini-api-key"><small>Получить на aistudio.google.com</small></div>
-            <div class="form-group"><label>Text Model</label><input type="text" id="textModel" placeholder="gemini-2.5-flash-preview-05-20"><small>Gemini: gemini-2.5-flash-preview-05-20, gemini-2.0-flash, gemini-1.5-pro<br>Mistral: mistral-large-latest, mistral-medium-latest</small></div>
+            <h3 style="margin:20px 0 16px;color:#10b981;">🦙 Ollama (Local)</h3>
+            <div class="form-group"><label>Ollama URL</label><input type="text" id="ollamaUrl" placeholder="http://localhost:11434"><small>Локальный Ollama сервер</small></div>
+            <h3 style="margin:20px 0 16px;color:#10b981;">✨ Text Model</h3>
+            <div class="form-group"><label>Gemini API Key (опционально)</label><input type="password" id="geminiKey" placeholder="your-gemini-api-key"><small>Если используете Gemini</small></div>
+            <div class="form-group"><label>Text Model</label><input type="text" id="textModel" placeholder="llama3.2"><small>Ollama: llama3.2, llama3.1, mistral, qwen2.5<br>Gemini: gemini-2.5-flash-preview-05-20<br>Mistral: mistral-large-latest</small></div>
             <h3 style="margin:20px 0 16px;color:#10b981;">💬 System Prompt</h3>
             <div class="form-group"><label>Инструкции для AI</label><textarea id="systemPrompt" rows="6" placeholder="Ты Бахром, сотрудник Sog'lom taom..." style="font-size:12px;"></textarea><small>Оставьте пустым для дефолтного промпта</small></div>
             <button class="btn btn-primary" onclick="saveConfig()">💾 Сохранить</button>
@@ -1029,8 +1126,9 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                 document.getElementById('apiHash').value = data.api_hash || '';
                 document.getElementById('mistralKey').value = data.mistral_key || '';
                 document.getElementById('geminiKey').value = data.gemini_key || '';
+                document.getElementById('ollamaUrl').value = data.ollama_url || 'http://localhost:11434';
                 document.getElementById('mistralModel').value = data.mistral_model || 'pixtral-12b-2409';
-                document.getElementById('textModel').value = data.text_model || 'gemini-2.5-flash-preview-05-20';
+                document.getElementById('textModel').value = data.text_model || 'llama3.2';
                 document.getElementById('systemPrompt').value = data.system_prompt || '';
             } catch(e) {}
         }
@@ -1041,6 +1139,7 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                 api_hash: document.getElementById('apiHash').value,
                 mistral_key: document.getElementById('mistralKey').value,
                 gemini_key: document.getElementById('geminiKey').value,
+                ollama_url: document.getElementById('ollamaUrl').value,
                 mistral_model: document.getElementById('mistralModel').value,
                 text_model: document.getElementById('textModel').value,
                 system_prompt: document.getElementById('systemPrompt').value
