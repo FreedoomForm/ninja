@@ -1,7 +1,8 @@
 """
-Ninja Userbot - Telegram Auto-Reply with Mistral AI
+Ninja Userbot - Telegram Auto-Reply with AI
 Runs as YOUR Telegram account (Userbot, not Bot)
-Supports images via Mistral Vision API
+Supports images via Mistral Vision API (Pixtral)
+Universal OpenAI-compatible API for text generation
 Lead tracking to Saved Messages
 Web UI Authentication
 """
@@ -87,12 +88,13 @@ COMPANY_INFO = """
 DEFAULT_CONFIG = {
     "api_id": "36244324",
     "api_hash": "15657d847ab4b8ae111ade8e2cbca51f",
+    # Vision API (Pixtral/Mistral for image descriptions)
     "mistral_key": "bz2Mp9E67ep1QfmaHzXBSJaRVOfIkx8v",
-    "gemini_key": "AIzaSyB0TZA5Y3gB6ce-wJSnpeE3kz4wb18eBgc",
-    "ollama_key": "",
-    "ollama_url": "https://api.ollama.ai/v1",
     "mistral_model": "pixtral-12b-2409",
-    "text_model": "llama3.2",
+    # OpenAI-compatible API (for text generation)
+    "api_base_url": "",
+    "api_key": "",
+    "model": "",
     "system_prompt": "",
     "lead_prompt": "",
 }
@@ -279,117 +281,14 @@ async def download_and_encode_image(msg) -> Optional[str]:
         print(f"Error downloading image: {e}")
         return None
 
-async def call_mistral_vision(messages: list[dict], api_key: str, model: str) -> str:
-    url = "https://api.mistral.ai/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {"model": model, "messages": messages, "temperature": 0.7, "max_tokens": 1000}
-    async with httpx.AsyncClient(timeout=120) as http_client:
-        r = await http_client.post(url, headers=headers, json=payload)
-        if r.status_code != 200:
-            raise Exception(f"API Error {r.status_code}: {r.text}")
-        return r.json()["choices"][0]["message"]["content"].strip()
-
-async def call_gemini(messages: list[dict], api_key: str, model: str = "gemini-2.5-flash-preview-05-20") -> str:
-    """Call Google Gemini API"""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-
-    # Convert messages to Gemini format
-    contents = []
-    for msg in messages:
-        role = "user" if msg["role"] == "user" else "model"
-        content = msg.get("content", "")
-
-        # Handle multimodal content
-        if isinstance(content, list):
-            parts = []
-            for item in content:
-                if item.get("type") == "text":
-                    parts.append({"text": item["text"]})
-                elif item.get("type") == "image_url":
-                    # Extract base64 from data URL
-                    image_url = item.get("image_url", {}).get("url", "")
-                    if image_url.startswith("data:"):
-                        mime_end = image_url.index(";base64,")
-                        mime_type = image_url[5:mime_end]
-                        base64_data = image_url[mime_end + 8:]
-                        parts.append({
-                            "inline_data": {
-                                "mime_type": mime_type,
-                                "data": base64_data
-                            }
-                        })
-            contents.append({"role": role, "parts": parts})
-        else:
-            contents.append({"role": role, "parts": [{"text": str(content)}]})
-
-    # Extract system instruction
-    system_instruction = None
-    if messages and messages[0]["role"] == "system":
-        system_instruction = {"parts": [{"text": messages[0].get("content", "")}]}
-
-    payload = {
-        "contents": contents,
-        "generationConfig": {
-            "temperature": 0.7,
-            "maxOutputTokens": 1000
-        }
-    }
-    if system_instruction:
-        payload["systemInstruction"] = system_instruction
-
-    async with httpx.AsyncClient(timeout=120) as http_client:
-        r = await http_client.post(url, json=payload)
-        if r.status_code != 200:
-            raise Exception(f"Gemini API Error {r.status_code}: {r.text}")
-        result = r.json()
-        return result["candidates"][0]["content"]["parts"][0]["text"].strip()
-
-def is_gemini_model(model: str) -> bool:
-    """Check if model is Gemini"""
-    return model.startswith("gemini")
-
-async def call_ollama(messages: list[dict], ollama_url: str, ollama_key: str, model: str = "llama3.2") -> str:
-    """Call Ollama API (cloud or local)"""
-    # Cloud API uses OpenAI-compatible endpoint
-    url = f"{ollama_url.rstrip('/')}/chat/completions"
-
-    # Convert messages to OpenAI format
-    ollama_messages = []
-    for msg in messages:
-        content = msg.get("content", "")
-        # Handle multimodal content (convert to text only for Ollama)
-        if isinstance(content, list):
-            text_parts = []
-            for item in content:
-                if item.get("type") == "text":
-                    text_parts.append(item["text"])
-                elif item.get("type") == "image_url":
-                    text_parts.append("[изображение]")
-            content = " ".join(text_parts)
-
-        ollama_messages.append({
-            "role": msg["role"],
-            "content": str(content)
-        })
-
-    payload = {
-        "model": model,
-        "messages": ollama_messages,
-        "stream": False
-    }
-
-    headers = {"Content-Type": "application/json"}
-    if ollama_key:
-        headers["Authorization"] = f"Bearer {ollama_key}"
-
-    async with httpx.AsyncClient(timeout=120) as http_client:
-        r = await http_client.post(url, json=payload, headers=headers)
-        if r.status_code != 200:
-            raise Exception(f"Ollama API Error {r.status_code}: {r.text}")
-        return r.json()["choices"][0]["message"]["content"].strip()
-
+# ---------------------------------------------------------------------------
+# AI API Functions
+# ---------------------------------------------------------------------------
 async def describe_image_with_pixtral(image_url: str, mistral_key: str, model: str = "pixtral-12b-2409") -> str:
-    """Describe image using Pixtral vision model"""
+    """Describe image using Pixtral vision model (Mistral)"""
+    url = "https://api.mistral.ai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {mistral_key}", "Content-Type": "application/json"}
+    
     messages = [
         {
             "role": "user",
@@ -399,17 +298,66 @@ async def describe_image_with_pixtral(image_url: str, mistral_key: str, model: s
             ]
         }
     ]
-    return await call_mistral_vision(messages, mistral_key, model)
+    
+    payload = {"model": model, "messages": messages, "temperature": 0.7, "max_tokens": 500}
+    
+    async with httpx.AsyncClient(timeout=120) as http_client:
+        r = await http_client.post(url, headers=headers, json=payload)
+        if r.status_code != 200:
+            raise Exception(f"Pixtral API Error {r.status_code}: {r.text}")
+        return r.json()["choices"][0]["message"]["content"].strip()
 
-async def call_ai(messages: list[dict], cfg: dict, model: str = None) -> str:
-    """Call appropriate AI based on model selection"""
-    if model is None:
-        model = cfg.get("text_model", "llama3.2")
+async def call_openai_compatible(messages: list[dict], base_url: str, api_key: str, model: str) -> str:
+    """Call any OpenAI-compatible API"""
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    
+    # Convert messages to text-only format
+    clean_messages = []
+    for msg in messages:
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            # Extract text parts
+            text_parts = []
+            for item in content:
+                if item.get("type") == "text":
+                    text_parts.append(item["text"])
+            content = "\n".join(text_parts)
+        clean_messages.append({
+            "role": msg["role"],
+            "content": str(content)
+        })
+    
+    payload = {
+        "model": model,
+        "messages": clean_messages,
+        "temperature": 0.7,
+        "max_tokens": 1000,
+        "stream": False
+    }
+    
+    async with httpx.AsyncClient(timeout=120) as http_client:
+        r = await http_client.post(url, json=payload, headers=headers)
+        if r.status_code != 200:
+            raise Exception(f"API Error {r.status_code}: {r.text}")
+        return r.json()["choices"][0]["message"]["content"].strip()
 
+async def call_ai(messages: list[dict], cfg: dict) -> str:
+    """Main AI function - handles images with Pixtral, text with OpenAI-compatible API"""
+    base_url = cfg.get("api_base_url", "")
+    api_key = cfg.get("api_key", "")
+    model = cfg.get("model", "")
+    
+    if not base_url or not model:
+        raise Exception("Настройте API Base URL и Model в настройках")
+    
     # Add current date/time context
     now = datetime.now()
     time_context = f"\n\n[ТЕКУЩЕЕ ВРЕМЯ: {now.strftime('%d.%m.%Y %H:%M')} ({now.strftime('%A')})]"
-
+    
     # Add time context to system message
     messages_with_time = messages.copy()
     if messages_with_time and messages_with_time[0]["role"] == "system":
@@ -417,7 +365,7 @@ async def call_ai(messages: list[dict], cfg: dict, model: str = None) -> str:
             "role": "system",
             "content": messages_with_time[0]["content"] + time_context
         }
-
+    
     # Check if there are images in messages
     has_image = False
     image_url = None
@@ -431,16 +379,18 @@ async def call_ai(messages: list[dict], cfg: dict, model: str = None) -> str:
                     break
         if has_image:
             break
-
-    # If image exists, first describe it with Pixtral
+    
+    # If image exists, describe it with Pixtral first
     if has_image and image_url:
+        mistral_key = cfg.get("mistral_key", "")
+        mistral_model = cfg.get("mistral_model", "pixtral-12b-2409")
+        
+        if not mistral_key:
+            raise Exception("Для обработки изображений нужен Mistral API ключ (Pixtral)")
+        
         # Describe image with Pixtral
-        image_description = await describe_image_with_pixtral(
-            image_url,
-            cfg.get("mistral_key", ""),
-            cfg.get("mistral_model", "pixtral-12b-2409")
-        )
-
+        image_description = await describe_image_with_pixtral(image_url, mistral_key, mistral_model)
+        
         # Replace image with description in messages
         for msg in messages_with_time:
             content = msg.get("content", "")
@@ -450,32 +400,22 @@ async def call_ai(messages: list[dict], cfg: dict, model: str = None) -> str:
                     if item.get("type") == "text":
                         new_content.append(item)
                     elif item.get("type") == "image_url":
-                        # Replace image with its description
                         new_content.append({
                             "type": "text",
                             "text": f"\n[ИЗОБРАЖЕНИЕ: {image_description}]\n"
                         })
                 msg["content"] = new_content
+    
+    # Call the OpenAI-compatible API
+    return await call_openai_compatible(messages_with_time, base_url, api_key, model)
 
-    # Now call the text model
-    if is_gemini_model(model):
-        # Gemini model
-        return await call_gemini(messages_with_time, cfg.get("gemini_key", ""), model)
-    elif model.startswith("mistral:"):
-        # Mistral text model (format: mistral:mistral-large-latest)
-        model_name = model[8:]
-        return await call_mistral_vision(messages_with_time, cfg.get("mistral_key", ""), model_name)
-    else:
-        # Default: Ollama (cloud or local)
-        return await call_ollama(messages_with_time, cfg.get("ollama_url", "https://api.ollama.ai/v1"), cfg.get("ollama_key", ""), model)
-
-async def analyze_lead(conversation: list[dict], cfg: dict, model: str) -> dict:
+async def analyze_lead(conversation: list[dict], cfg: dict) -> dict:
     try:
         messages = [
             {"role": "system", "content": DEFAULT_LEAD_PROMPT},
             {"role": "user", "content": f"Проанализируй переписку:\n\n{json.dumps(conversation, ensure_ascii=False, indent=2)}"}
         ]
-        result = await call_ai(messages, cfg, model)
+        result = await call_ai(messages, cfg)
         import re
         json_match = re.search(r'\{[^{}]*\}', result, re.DOTALL)
         if json_match:
@@ -556,8 +496,7 @@ async def handle_message(chat_id: int, sender: User, message):
         async with client.action(chat_id, "typing"):
             add_log("Думаю...", "System", "system")
             messages = get_conversation_messages(chat_id, config.get("system_prompt", DEFAULT_SYSTEM_PROMPT))
-            # call_ai handles image description with Pixtral automatically
-            reply = await call_ai(messages, config, config.get("text_model", "llama3.2"))
+            reply = await call_ai(messages, config)
     except Exception as e:
         add_log(f"AI Error: {e}", "System", "error")
         return
@@ -580,7 +519,7 @@ async def handle_message(chat_id: int, sender: User, message):
                     else:
                         conv_for_analysis.append(msg)
 
-                lead_result = await analyze_lead(conv_for_analysis, config, config.get("text_model", "llama3.2"))
+                lead_result = await analyze_lead(conv_for_analysis, config)
                 if lead_result.get("is_lead") and lead_result.get("confidence", 0) >= 0.6:
                     add_lead(lead_result, sender_name, chat_id)
                     lead_count += 1
@@ -679,11 +618,10 @@ class ConfigModel(BaseModel):
     api_id: str = ""
     api_hash: str = ""
     mistral_key: str = ""
-    gemini_key: str = ""
-    ollama_key: str = ""
-    ollama_url: str = "https://api.ollama.ai/v1"
     mistral_model: str = "pixtral-12b-2409"
-    text_model: str = "llama3.2"
+    api_base_url: str = ""
+    api_key: str = ""
+    model: str = ""
     system_prompt: str = ""
     lead_prompt: str = ""
 
@@ -761,7 +699,6 @@ async def send_phone(data: PhoneModel):
     global client, auth_state
     
     if client is None:
-        # Need to initialize client first
         if not config.get("api_id") or not config.get("api_hash"):
             return {"success": False, "error": "Настройте API ID и API Hash"}
         client = TelegramClient(str(SESSION_PATH), int(config["api_id"]), config["api_hash"])
@@ -802,7 +739,6 @@ async def send_code(data: CodeModel):
 
         add_log(f"✅ Вошел как {bot_username}", "System", "success")
 
-        # Register message handler
         @client.on(events.NewMessage)
         async def handler(event):
             global bot_running
@@ -816,8 +752,6 @@ async def send_code(data: CodeModel):
             await handle_message(event.chat_id, sender, event.message)
 
         add_log("🚀 Юзербот работает!", "System", "success")
-
-        # Process unread messages
         asyncio.create_task(process_unread_messages())
 
         return {"success": True, "username": bot_username}
@@ -913,14 +847,14 @@ WEB_UI_HTML = '''<!DOCTYPE html>
         .btn-primary:hover { background: #059669; }
         .btn-danger { background: #ef4444; color: #fff; }
         .btn-danger:hover { background: #dc2626; }
+        .btn-secondary { background: #6b7280; color: #fff; }
+        .btn-secondary:hover { background: #4b5563; }
         .btn:disabled { opacity: 0.5; cursor: not-allowed; }
         .form-group { margin-bottom: 16px; }
         .form-group label { display: block; margin-bottom: 6px; color: #9ca3af; font-size: 13px; }
         .form-group input, .form-group textarea, .form-group select { width: 100%; padding: 10px 12px; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; color: #fff; font-size: 14px; }
-        .form-group select { background: rgba(0,0,0,0.5); cursor: pointer; }
-        .form-group select option { background: #1a1a2e; color: #fff; }
-        .form-group input:focus, .form-group textarea:focus, .form-group select:focus { outline: none; border-color: #10b981; }
-        .form-group small { color: #6b7280; font-size: 11px; }
+        .form-group input:focus, .form-group textarea:focus { outline: none; border-color: #10b981; }
+        .form-group small { color: #6b7280; font-size: 11px; margin-top: 4px; display: block; }
         .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
         .logs { max-height: 350px; overflow-y: auto; background: rgba(0,0,0,0.2); border-radius: 8px; padding: 10px; }
         .log-entry { padding: 10px; border-bottom: 1px solid rgba(255,255,255,0.05); display: flex; gap: 10px; font-size: 12px; }
@@ -934,9 +868,8 @@ WEB_UI_HTML = '''<!DOCTYPE html>
         .log-error { border-left: 3px solid #ef4444; }
         .log-success { border-left: 3px solid #10b981; }
         .log-lead { border-left: 3px solid #f59e0b; background: rgba(245, 158, 11, 0.05); }
-        .log-image { color: #f59e0b; }
         .info-box { background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 8px; padding: 12px 16px; margin-bottom: 20px; font-size: 13px; color: #93c5fd; }
-        .feature-badge { display: inline-block; padding: 3px 8px; background: rgba(16, 185, 129, 0.2); border-radius: 4px; font-size: 11px; color: #10b981; margin-left: 8px; }
+        .warning-box { background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.3); border-radius: 8px; padding: 12px 16px; margin-bottom: 20px; font-size: 13px; color: #fcd34d; }
         .auth-modal { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center; }
         .auth-modal.show { display: flex; }
         .auth-box { background: #1a1a2e; border-radius: 16px; padding: 30px; max-width: 400px; width: 90%; text-align: center; }
@@ -953,6 +886,8 @@ WEB_UI_HTML = '''<!DOCTYPE html>
         .urgency-high { color: #ef4444; }
         .urgency-medium { color: #f59e0b; }
         .urgency-low { color: #10b981; }
+        .section-title { font-size: 16px; font-weight: 600; margin-bottom: 12px; color: #10b981; display: flex; align-items: center; gap: 8px; }
+        .divider { height: 1px; background: rgba(255,255,255,0.1); margin: 20px 0; }
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-track { background: rgba(255,255,255,0.05); border-radius: 3px; }
         ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 3px; }
@@ -970,325 +905,480 @@ WEB_UI_HTML = '''<!DOCTYPE html>
     </div>
 
     <div class="container">
+        <!-- Header -->
         <div class="header">
-            <h1><span>🥷</span> Ninja Userbot <span class="feature-badge">Sog'lom taom</span></h1>
-            <div id="statusBadge" class="status-badge status-offline">Offline</div>
+            <h1>🥷 Ninja Userbot</h1>
+            <span id="statusBadge" class="status-badge status-offline">Оффлайн</span>
         </div>
-        <div class="info-box">
-            <strong>Telegram Userbot для Sog'lom taom</strong> — автоответчик для клиентов здорового питания.
-            Отвечает как реальный сотрудник + определяет успешные лиды → Saved Messages.
-        </div>
+
+        <!-- Stats -->
         <div class="stats">
-            <div class="stat-card"><div id="statStatus" class="value">Stopped</div><div class="label">Статус</div></div>
-            <div class="stat-card"><div id="statMessages" class="value">0</div><div class="label">Сообщений</div></div>
-            <div class="stat-card highlight"><div id="statLeads" class="value">0</div><div class="label">Лидов</div></div>
-            <div class="stat-card"><div id="statUser" class="value">-</div><div class="label">Аккаунт</div></div>
+            <div class="stat-card">
+                <div class="value" id="statMessages">0</div>
+                <div class="label">Сообщений</div>
+            </div>
+            <div class="stat-card highlight">
+                <div class="value" id="statLeads">0</div>
+                <div class="label">Лидов</div>
+            </div>
+            <div class="stat-card">
+                <div class="value" id="statUsername">-</div>
+                <div class="label">Аккаунт</div>
+            </div>
+            <div class="stat-card">
+                <div class="value" id="statModel">-</div>
+                <div class="label">Модель</div>
+            </div>
         </div>
+
+        <!-- Tabs -->
         <div class="tabs">
-            <button class="tab active" onclick="showTab('control')">🎮 Управление</button>
-            <button class="tab" onclick="showTab('leads')">🎯 Лиды</button>
-            <button class="tab" onclick="showTab('settings')">⚙️ Настройки</button>
-            <button class="tab" onclick="showTab('logs')">📋 Логи</button>
+            <button class="tab active" onclick="showPanel('control')">🎮 Управление</button>
+            <button class="tab" onclick="showPanel('config')">⚙️ Настройки</button>
+            <button class="tab" onclick="showPanel('logs')">📋 Логи</button>
+            <button class="tab" onclick="showPanel('leads')">🎯 Лиды</button>
         </div>
-        <div id="tab-control" class="panel active">
+
+        <!-- Control Panel -->
+        <div id="panel-control" class="panel active">
+            <div class="info-box">
+                💡 <strong>OpenAI-compatible API</strong> - работает с любым провайдером: Ollama Cloud, Together AI, Groq, Mistral, OpenAI и др.
+            </div>
+            
             <div style="margin-bottom: 20px;">
-                <button id="startBtn" class="btn btn-primary" onclick="startBot()">▶ Запустить</button>
-                <button id="stopBtn" class="btn btn-danger" onclick="stopBot()" disabled>⏹ Остановить</button>
-                <button class="btn" onclick="refreshAll()" style="background:#374151;">🔄 Обновить</button>
+                <button id="btnStart" class="btn btn-primary" onclick="startBot()">▶️ Запустить</button>
+                <button id="btnStop" class="btn btn-danger" onclick="stopBot()" disabled>⏹️ Остановить</button>
+                <button class="btn btn-secondary" onclick="refreshStatus()">🔄 Обновить</button>
             </div>
-            <div class="logs" id="controlLogs"></div>
-        </div>
-        <div id="tab-leads" class="panel">
-            <button class="btn" onclick="clearLeads()" style="background:#374151;margin-bottom:15px;">🗑 Очистить лиды</button>
-            <div id="leadsList"></div>
-        </div>
-        <div id="tab-settings" class="panel">
-            <h3 style="margin-bottom:16px;color:#10b981;">📱 Telegram</h3>
+
+            <div class="divider"></div>
+
+            <div class="section-title">📝 Быстрые настройки API</div>
             <div class="form-row">
-                <div class="form-group"><label>API ID</label><input type="text" id="apiId" placeholder="12345678"><small>Получить на my.telegram.org</small></div>
-                <div class="form-group"><label>API Hash</label><input type="password" id="apiHash" placeholder="a1b2c3d4e5f6..."></div>
+                <div class="form-group">
+                    <label>API Base URL</label>
+                    <input type="text" id="quickBaseUrl" placeholder="https://api.openai.com/v1">
+                    <small>Например: https://api.ollama.ai/v1</small>
+                </div>
+                <div class="form-group">
+                    <label>Model</label>
+                    <input type="text" id="quickModel" placeholder="gpt-4o-mini">
+                    <small>Например: llama3.2, gpt-4o-mini</small>
+                </div>
             </div>
-            <h3 style="margin:20px 0 16px;color:#10b981;">🤖 Mistral AI (Vision)</h3>
-            <div class="form-group"><label>Mistral API Key</label><input type="password" id="mistralKey" placeholder="your-api-key"><small>Для изображений (Pixtral) - описывает картинки перед отправкой в текстовую модель</small></div>
-            <div class="form-group"><label>Vision Model</label><select id="mistralModel"><option value="pixtral-12b-2409">Pixtral 12B</option><option value="pixtral-large-latest">Pixtral Large</option></select></div>
-            <h3 style="margin:20px 0 16px;color:#10b981;">🦙 Ollama Cloud</h3>
-            <div class="form-group"><label>Ollama API Key</label><input type="password" id="ollamaKey" placeholder="your-ollama-api-key"><small>Получить на ollama.ai</small></div>
-            <div class="form-group"><label>Ollama URL</label><input type="text" id="ollamaUrl" placeholder="https://api.ollama.ai/v1"><small>Cloud API URL (по умолчанию: https://api.ollama.ai/v1)</small></div>
-            <h3 style="margin:20px 0 16px;color:#10b981;">✨ Text Model</h3>
-            <div class="form-group"><label>Gemini API Key (опционально)</label><input type="password" id="geminiKey" placeholder="your-gemini-api-key"><small>Если используете Gemini</small></div>
-            <div class="form-group"><label>Text Model</label><input type="text" id="textModel" placeholder="llama3.2"><small>Ollama: llama3.2, llama3.1, mistral, qwen2.5<br>Gemini: gemini-2.5-flash-preview-05-20<br>Mistral: mistral:mistral-large-latest</small></div>
-            <h3 style="margin:20px 0 16px;color:#10b981;">💬 System Prompt</h3>
-            <div class="form-group"><label>Инструкции для AI</label><textarea id="systemPrompt" rows="6" placeholder="Ты Бахром, сотрудник Sog'lom taom..." style="font-size:12px;"></textarea><small>Оставьте пустым для дефолтного промпта</small></div>
-            <button class="btn btn-primary" onclick="saveConfig()">💾 Сохранить</button>
+            <div class="form-group">
+                <label>API Key</label>
+                <input type="password" id="quickApiKey" placeholder="sk-...">
+            </div>
+            <button class="btn btn-primary" onclick="saveQuickConfig()">💾 Сохранить</button>
         </div>
-        <div id="tab-logs" class="panel">
-            <button class="btn" onclick="clearLogs()" style="background:#374151;margin-bottom:15px;">🗑 Очистить логи</button>
-            <div class="logs" id="logsList"></div>
+
+        <!-- Config Panel -->
+        <div id="panel-config" class="panel">
+            <div class="warning-box">
+                ⚠️ <strong>Pixtral (Mistral)</strong> используется для описания изображений. Без него картинки не будут анализироваться.
+            </div>
+
+            <div class="section-title">🖼️ Vision API (для изображений)</div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Mistral API Key (Pixtral)</label>
+                    <input type="password" id="mistralKey" placeholder="Для обработки изображений">
+                </div>
+                <div class="form-group">
+                    <label>Pixtral Model</label>
+                    <input type="text" id="mistralModel" value="pixtral-12b-2409">
+                </div>
+            </div>
+
+            <div class="divider"></div>
+
+            <div class="section-title">🤖 Text API (OpenAI-compatible)</div>
+            <div class="form-group">
+                <label>API Base URL</label>
+                <input type="text" id="apiBaseUrl" placeholder="https://api.openai.com/v1">
+                <small>Любой OpenAI-совместимый endpoint</small>
+            </div>
+            <div class="form-group">
+                <label>API Key</label>
+                <input type="password" id="apiKey" placeholder="Ваш API ключ">
+            </div>
+            <div class="form-group">
+                <label>Model Name</label>
+                <input type="text" id="modelName" placeholder="gpt-4o-mini, llama3.2, mistral-large-latest...">
+            </div>
+
+            <div class="divider"></div>
+
+            <div class="section-title">📱 Telegram API</div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>API ID</label>
+                    <input type="text" id="apiId">
+                </div>
+                <div class="form-group">
+                    <label>API Hash</label>
+                    <input type="text" id="apiHash">
+                </div>
+            </div>
+
+            <div class="divider"></div>
+
+            <div class="section-title">🎭 System Prompt</div>
+            <div class="form-group">
+                <label>Промпт для AI (персонаж и стиль)</label>
+                <textarea id="systemPrompt" rows="10" style="font-family: monospace; font-size: 12px;"></textarea>
+            </div>
+
+            <div style="margin-top: 20px;">
+                <button class="btn btn-primary" onclick="saveConfig()">💾 Сохранить настройки</button>
+            </div>
         </div>
-        <p style="text-align:center;color:#6b7280;margin-top:30px;font-size:12px;">🥷 Ninja Userbot • Sog'lom taom Edition</p>
+
+        <!-- Logs Panel -->
+        <div id="panel-logs" class="panel">
+            <div style="margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center;">
+                <h3>📋 Логи сообщений</h3>
+                <div>
+                    <button class="btn btn-secondary" onclick="refreshLogs()">🔄 Обновить</button>
+                    <button class="btn btn-danger" onclick="clearLogs()">🗑️ Очистить</button>
+                </div>
+            </div>
+            <div id="logsContainer" class="logs"></div>
+        </div>
+
+        <!-- Leads Panel -->
+        <div id="panel-leads" class="panel">
+            <div style="margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center;">
+                <h3>🎯 Найденные лиды</h3>
+                <div>
+                    <button class="btn btn-secondary" onclick="refreshLeads()">🔄 Обновить</button>
+                    <button class="btn btn-danger" onclick="clearLeads()">🗑️ Очистить</button>
+                </div>
+            </div>
+            <div id="leadsContainer"></div>
+        </div>
     </div>
+
     <script>
-        const API = window.location.origin + '/api';
         let authStep = 'idle';
 
-        function showTab(name) { 
-            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active')); 
-            document.querySelectorAll('.panel').forEach(t => t.classList.remove('active')); 
-            event.target.classList.add('active'); 
-            document.getElementById('tab-' + name).classList.add('active'); 
-        }
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            loadConfig();
+            refreshStatus();
+        });
 
-        async function updateStatus() {
-            try {
-                const res = await fetch(`${API}/status`);
-                const data = await res.json();
-                document.getElementById('statusBadge').textContent = data.running ? 'Online' : 'Offline';
-                document.getElementById('statusBadge').className = 'status-badge ' + (data.running ? 'status-online' : 'status-offline');
-                document.getElementById('statStatus').textContent = data.running ? 'Running' : 'Stopped';
-                document.getElementById('statMessages').textContent = data.message_count;
-                document.getElementById('statLeads').textContent = data.lead_count || 0;
-                document.getElementById('statUser').textContent = data.username || '-';
-                document.getElementById('startBtn').disabled = data.running;
-                document.getElementById('stopBtn').disabled = !data.running;
-            } catch(e) {
-                document.getElementById('statusBadge').textContent = 'No Connection';
-            }
-        }
-
-        async function checkAuth() {
-            try {
-                const res = await fetch(`${API}/auth/status`);
-                const data = await res.json();
-                authStep = data.step;
-
-                if (authStep === 'phone') {
-                    document.getElementById('authModal').classList.add('show');
-                    document.getElementById('authTitle').textContent = '📱 Введите номер телефона';
-                    document.getElementById('authInput').placeholder = '+998901234567';
-                    document.getElementById('authInput').value = '';
-                    document.getElementById('authError').textContent = data.error || '';
-                } else if (authStep === 'code') {
-                    document.getElementById('authModal').classList.add('show');
-                    document.getElementById('authTitle').textContent = '🔢 Введите код из Telegram';
-                    document.getElementById('authInput').placeholder = '12345';
-                    document.getElementById('authInput').value = '';
-                    document.getElementById('authError').textContent = data.error || '';
-                } else if (authStep === 'done' || data.running) {
-                    document.getElementById('authModal').classList.remove('show');
-                }
-            } catch(e) {}
-        }
-
-        async function submitAuth() {
-            const input = document.getElementById('authInput').value.trim();
-            const errorEl = document.getElementById('authError');
-
-            if (!input) {
-                errorEl.textContent = 'Введите значение';
-                return;
-            }
-
-            try {
-                if (authStep === 'phone') {
-                    const res = await fetch(`${API}/auth/phone`, {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({phone: input})
-                    });
-                    const data = await res.json();
-                    if (data.success) {
-                        authStep = 'code';
-                        document.getElementById('authTitle').textContent = '🔢 Введите код из Telegram';
-                        document.getElementById('authInput').placeholder = '12345';
-                        document.getElementById('authInput').value = '';
-                        errorEl.textContent = '';
-                    } else {
-                        errorEl.textContent = data.error || 'Ошибка';
-                    }
-                } else if (authStep === 'code') {
-                    const res = await fetch(`${API}/auth/code`, {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({code: input})
-                    });
-                    const data = await res.json();
-                    if (data.success) {
-                        document.getElementById('authModal').classList.remove('show');
-                        authStep = 'done';
-                        updateStatus();
-                        loadLogs();
-                    } else {
-                        errorEl.textContent = data.error || 'Неверный код';
-                    }
-                }
-            } catch(e) {
-                errorEl.textContent = 'Ошибка соединения';
-            }
+        function showPanel(name) {
+            document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.getElementById('panel-' + name).classList.add('active');
+            event.target.classList.add('active');
+            
+            if (name === 'logs') refreshLogs();
+            if (name === 'leads') refreshLeads();
         }
 
         async function loadConfig() {
             try {
-                const res = await fetch(`${API}/config`);
-                const data = await res.json();
+                const r = await fetch('/api/config');
+                const data = await r.json();
+                
+                // Vision API
+                document.getElementById('mistralKey').value = data.mistral_key || '';
+                document.getElementById('mistralModel').value = data.mistral_model || 'pixtral-12b-2409';
+                
+                // Text API
+                document.getElementById('apiBaseUrl').value = data.api_base_url || '';
+                document.getElementById('apiKey').value = data.api_key || '';
+                document.getElementById('modelName').value = data.model || '';
+                
+                // Quick settings
+                document.getElementById('quickBaseUrl').value = data.api_base_url || '';
+                document.getElementById('quickApiKey').value = data.api_key || '';
+                document.getElementById('quickModel').value = data.model || '';
+                
+                // Telegram
                 document.getElementById('apiId').value = data.api_id || '';
                 document.getElementById('apiHash').value = data.api_hash || '';
-                document.getElementById('mistralKey').value = data.mistral_key || '';
-                document.getElementById('geminiKey').value = data.gemini_key || '';
-                document.getElementById('ollamaKey').value = data.ollama_key || '';
-                document.getElementById('ollamaUrl').value = data.ollama_url || 'https://api.ollama.ai/v1';
-                document.getElementById('mistralModel').value = data.mistral_model || 'pixtral-12b-2409';
-                document.getElementById('textModel').value = data.text_model || 'llama3.2';
+                
+                // Prompts
                 document.getElementById('systemPrompt').value = data.system_prompt || '';
-            } catch(e) {}
+            } catch (e) {
+                console.error('Load config error:', e);
+            }
         }
 
         async function saveConfig() {
-            const cfg = {
+            const config = {
+                mistral_key: document.getElementById('mistralKey').value,
+                mistral_model: document.getElementById('mistralModel').value,
+                api_base_url: document.getElementById('apiBaseUrl').value,
+                api_key: document.getElementById('apiKey').value,
+                model: document.getElementById('modelName').value,
                 api_id: document.getElementById('apiId').value,
                 api_hash: document.getElementById('apiHash').value,
-                mistral_key: document.getElementById('mistralKey').value,
-                gemini_key: document.getElementById('geminiKey').value,
-                ollama_key: document.getElementById('ollamaKey').value,
-                ollama_url: document.getElementById('ollamaUrl').value,
-                mistral_model: document.getElementById('mistralModel').value,
-                text_model: document.getElementById('textModel').value,
                 system_prompt: document.getElementById('systemPrompt').value
             };
+            
             try {
-                await fetch(`${API}/config`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(cfg) });
-                alert('✅ Сохранено!');
-                loadLogs();
-            } catch(e) {
-                alert('❌ Ошибка: ' + e);
+                await fetch('/api/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(config)
+                });
+                alert('✅ Настройки сохранены!');
+            } catch (e) {
+                alert('❌ Ошибка сохранения: ' + e.message);
             }
         }
-        
-        async function startBot() { 
-            try { 
-                await fetch(`${API}/start`, {method: 'POST'}); 
-                setTimeout(checkAuth, 1500); 
-                updateStatus(); 
-                loadLogs(); 
-            } catch(e) {} 
-        }
-        
-        async function stopBot() { 
-            try { 
-                await fetch(`${API}/stop`, {method: 'POST'}); 
-                updateStatus(); 
-            } catch(e) {} 
-        }
-        
-        async function loadLogs() { 
-            try { 
-                const res = await fetch(`${API}/logs`); 
-                const logs = await res.json(); 
-                const html = renderLogs(logs); 
-                document.getElementById('logsList').innerHTML = html; 
-                document.getElementById('controlLogs').innerHTML = html; 
-            } catch(e) {} 
-        }
-        
-        async function clearLogs() { 
-            try { 
-                await fetch(`${API}/logs`, {method: 'DELETE'}); 
-                loadLogs(); 
-            } catch(e) {} 
-        }
-        
-        async function loadLeads() { 
-            try { 
-                const res = await fetch(`${API}/leads`); 
-                const leads = await res.json(); 
-                document.getElementById('leadsList').innerHTML = renderLeads(leads); 
-            } catch(e) {} 
-        }
-        
-        async function clearLeads() { 
-            try { 
-                await fetch(`${API}/leads`, {method: 'DELETE'}); 
-                loadLeads(); 
-                updateStatus(); 
-            } catch(e) {} 
-        }
-        
-        function renderLogs(logs) { 
-            if (!logs || logs.length === 0) return '<p style="color:#6b7280;text-align:center;padding:20px;">Нет записей</p>'; 
-            return logs.slice().reverse().map(log => { 
-                const imageIcon = log.has_image ? '<span class="log-image">🖼️</span> ' : ''; 
-                return `<div class="log-entry log-${log.direction}"><span class="log-time">${log.timestamp}</span><span class="log-sender">${log.sender}</span><span class="log-message">${imageIcon}${escapeHtml(log.message)}</span></div>`; 
-            }).join(''); 
-        }
-        
-        function renderLeads(leads) { 
-            if (!leads || leads.length === 0) return '<p style="color:#6b7280;text-align:center;padding:20px;">Нет лидов</p>'; 
-            return leads.slice().reverse().map(lead => { 
-                const urgencyClass = `urgency-${lead.urgency || 'medium'}`; 
-                return `<div class="lead-card"><div class="lead-header"><span class="lead-client">👤 ${lead.client_name || 'Клиент'}</span><span class="lead-type">${lead.lead_type || 'new_client'}</span></div><div class="lead-summary">${lead.summary || ''}</div><div class="lead-meta"><span>📊 ${((lead.confidence || 0.5) * 100).toFixed(0)}%</span><span class="${urgencyClass}">⚡ ${lead.urgency || 'medium'}</span><span>🕐 ${lead.timestamp || ''}</span></div></div>`; 
-            }).join(''); 
-        }
-        
-        function escapeHtml(text) { 
-            const div = document.createElement('div'); 
-            div.textContent = text; 
-            return div.innerHTML; 
+
+        async function saveQuickConfig() {
+            const config = {
+                api_base_url: document.getElementById('quickBaseUrl').value,
+                api_key: document.getElementById('quickApiKey').value,
+                model: document.getElementById('quickModel').value
+            };
+            
+            try {
+                await fetch('/api/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(config)
+                });
+                
+                // Sync with main config fields
+                document.getElementById('apiBaseUrl').value = config.api_base_url;
+                document.getElementById('apiKey').value = config.api_key;
+                document.getElementById('modelName').value = config.model;
+                
+                alert('✅ Быстрые настройки сохранены!');
+                refreshStatus();
+            } catch (e) {
+                alert('❌ Ошибка: ' + e.message);
+            }
         }
 
-        function refreshAll() {
-            updateStatus();
-            loadLogs();
-            loadLeads();
-            checkAuth();
+        async function refreshStatus() {
+            try {
+                const r = await fetch('/api/status');
+                const data = await r.json();
+                
+                const badge = document.getElementById('statusBadge');
+                badge.textContent = data.running ? 'Онлайн' : 'Оффлайн';
+                badge.className = 'status-badge ' + (data.running ? 'status-online' : 'status-offline');
+                
+                document.getElementById('statMessages').textContent = data.message_count;
+                document.getElementById('statLeads').textContent = data.lead_count;
+                document.getElementById('statUsername').textContent = data.username || '-';
+                
+                document.getElementById('btnStart').disabled = data.running;
+                document.getElementById('btnStop').disabled = !data.running;
+                
+                // Check auth status
+                const ar = await fetch('/api/auth/status');
+                const auth = await ar.json();
+                authStep = auth.step;
+                
+                if (auth.step === 'phone' || auth.step === 'code') {
+                    showAuthModal();
+                }
+            } catch (e) {
+                console.error('Status error:', e);
+            }
+            
+            // Load model name for stats
+            try {
+                const cr = await fetch('/api/config');
+                const cfg = await cr.json();
+                document.getElementById('statModel').textContent = cfg.model ? cfg.model.substring(0, 12) : '-';
+            } catch (e) {}
         }
 
-        document.getElementById('authInput').addEventListener('keypress', function(e) { 
-            if (e.key === 'Enter') submitAuth(); 
+        async function startBot() {
+            try {
+                await fetch('/api/start', { method: 'POST' });
+                setTimeout(refreshStatus, 1000);
+            } catch (e) {
+                alert('Ошибка запуска: ' + e.message);
+            }
+        }
+
+        async function stopBot() {
+            try {
+                await fetch('/api/stop', { method: 'POST' });
+                setTimeout(refreshStatus, 500);
+            } catch (e) {
+                alert('Ошибка остановки: ' + e.message);
+            }
+        }
+
+        async function refreshLogs() {
+            try {
+                const r = await fetch('/api/logs');
+                const logs = await r.json();
+                const container = document.getElementById('logsContainer');
+                
+                if (logs.length === 0) {
+                    container.innerHTML = '<p style="color: #6b7280; text-align: center; padding: 20px;">Нет логов</p>';
+                    return;
+                }
+                
+                container.innerHTML = logs.reverse().map(log => {
+                    let dirClass = 'log-system';
+                    if (log.direction === 'incoming') dirClass = 'log-incoming';
+                    else if (log.direction === 'outgoing') dirClass = 'log-outgoing';
+                    else if (log.direction === 'error') dirClass = 'log-error';
+                    else if (log.direction === 'success') dirClass = 'log-success';
+                    else if (log.direction === 'lead') dirClass = 'log-lead';
+                    
+                    const imageBadge = log.has_image ? '<span class="log-image">📷</span> ' : '';
+                    
+                    return `<div class="log-entry ${dirClass}">
+                        <span class="log-time">${log.timestamp}</span>
+                        <span class="log-sender">${log.sender}</span>
+                        <span class="log-message">${imageBadge}${escapeHtml(log.message)}</span>
+                    </div>`;
+                }).join('');
+            } catch (e) {
+                console.error('Logs error:', e);
+            }
+        }
+
+        async function clearLogs() {
+            if (!confirm('Очистить все логи?')) return;
+            await fetch('/api/logs', { method: 'DELETE' });
+            refreshLogs();
+        }
+
+        async function refreshLeads() {
+            try {
+                const r = await fetch('/api/leads');
+                const leads = await r.json();
+                const container = document.getElementById('leadsContainer');
+                
+                if (leads.length === 0) {
+                    container.innerHTML = '<p style="color: #6b7280; text-align: center; padding: 20px;">Нет лидов</p>';
+                    return;
+                }
+                
+                container.innerHTML = leads.reverse().map(lead => {
+                    const urgencyClass = 'urgency-' + (lead.urgency || 'medium');
+                    return `<div class="lead-card">
+                        <div class="lead-header">
+                            <span class="lead-client">${escapeHtml(lead.client_name || 'Неизвестно')}</span>
+                            <span class="lead-type">${lead.lead_type || 'new_client'}</span>
+                        </div>
+                        <div class="lead-summary">${escapeHtml(lead.summary || '')}</div>
+                        <div class="lead-meta">
+                            <span class="${urgencyClass}">⚡ ${lead.urgency || 'medium'}</span>
+                            <span>📊 ${(lead.confidence || 0) * 100}%</span>
+                            <span>🕐 ${lead.timestamp || ''}</span>
+                        </div>
+                    </div>`;
+                }).join('');
+            } catch (e) {
+                console.error('Leads error:', e);
+            }
+        }
+
+        async function clearLeads() {
+            if (!confirm('Очистить все лиды?')) return;
+            await fetch('/api/leads', { method: 'DELETE' });
+            refreshLeads();
+        }
+
+        function showAuthModal() {
+            const modal = document.getElementById('authModal');
+            const title = document.getElementById('authTitle');
+            const input = document.getElementById('authInput');
+            const error = document.getElementById('authError');
+            
+            modal.classList.add('show');
+            error.textContent = '';
+            
+            if (authStep === 'phone') {
+                title.textContent = '📱 Введите номер телефона';
+                input.placeholder = '+998901234567';
+                input.type = 'tel';
+            } else if (authStep === 'code') {
+                title.textContent = '🔑 Введите код из Telegram';
+                input.placeholder = '12345';
+                input.type = 'text';
+            }
+            input.value = '';
+            input.focus();
+        }
+
+        async function submitAuth() {
+            const input = document.getElementById('authInput');
+            const error = document.getElementById('authError');
+            const value = input.value.trim();
+            
+            if (!value) {
+                error.textContent = 'Введите значение';
+                return;
+            }
+            
+            try {
+                if (authStep === 'phone') {
+                    const r = await fetch('/api/auth/phone', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ phone: value })
+                    });
+                    const data = await r.json();
+                    
+                    if (data.success) {
+                        authStep = 'code';
+                        showAuthModal();
+                    } else {
+                        error.textContent = data.error || 'Ошибка';
+                    }
+                } else if (authStep === 'code') {
+                    const r = await fetch('/api/auth/code', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ code: value })
+                    });
+                    const data = await r.json();
+                    
+                    if (data.success) {
+                        document.getElementById('authModal').classList.remove('show');
+                        authStep = 'done';
+                        refreshStatus();
+                    } else {
+                        error.textContent = data.error || 'Неверный код';
+                    }
+                }
+            } catch (e) {
+                error.textContent = 'Ошибка: ' + e.message;
+            }
+        }
+
+        // Handle Enter key in auth modal
+        document.getElementById('authInput').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') submitAuth();
         });
 
-        // Load once on start - NO periodic requests!
-        console.log('Ninja Userbot v2 - No auto-refresh');
-        loadConfig(); 
-        updateStatus(); 
-        loadLogs(); 
-        loadLeads();
-        // NO setInterval - user clicks Refresh button instead
+        function escapeHtml(text) {
+            if (!text) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
     </script>
 </body>
-</html>'''
+</html>
+'''
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    return HTMLResponse(
-        content=WEB_UI_HTML,
-        headers={
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Pragma": "no-cache",
-            "Expires": "0"
-        }
-    )
+    return WEB_UI_HTML
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-def open_browser():
-    import time
-    import webbrowser
-    time.sleep(1.5)
-    webbrowser.open("http://localhost:3030")
-
 if __name__ == "__main__":
-    print("\n" + "="*50)
-    print("🥷 NINJA USERBOT (Sog'lom taom Edition)")
-    print("="*50)
-    print("Telegram Auto-Reply with Mistral AI + Vision")
-    print("Отвечает как сотрудник компании здорового питания")
-    print("Автоматическое определение лидов → Saved Messages")
-    print("Web UI для авторизации и настроек")
-    print("="*50 + "\n")
-    
-    import threading
-    browser_thread = threading.Thread(target=open_browser, daemon=True)
-    browser_thread.start()
-    
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=3030)
