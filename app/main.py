@@ -89,7 +89,8 @@ DEFAULT_CONFIG = {
     "api_hash": "15657d847ab4b8ae111ade8e2cbca51f",
     "mistral_key": "bz2Mp9E67ep1QfmaHzXBSJaRVOfIkx8v",
     "gemini_key": "AIzaSyB0TZA5Y3gB6ce-wJSnpeE3kz4wb18eBgc",
-    "ollama_url": "http://localhost:11434",
+    "ollama_key": "",
+    "ollama_url": "https://api.ollama.ai/v1",
     "mistral_model": "pixtral-12b-2409",
     "text_model": "llama3.2",
     "system_prompt": "",
@@ -347,11 +348,12 @@ def is_gemini_model(model: str) -> bool:
     """Check if model is Gemini"""
     return model.startswith("gemini")
 
-async def call_ollama(messages: list[dict], ollama_url: str, model: str = "llama3.2") -> str:
-    """Call Ollama API (local)"""
-    url = f"{ollama_url.rstrip('/')}/api/chat"
+async def call_ollama(messages: list[dict], ollama_url: str, ollama_key: str, model: str = "llama3.2") -> str:
+    """Call Ollama API (cloud or local)"""
+    # Cloud API uses OpenAI-compatible endpoint
+    url = f"{ollama_url.rstrip('/')}/chat/completions"
 
-    # Convert messages to Ollama format
+    # Convert messages to OpenAI format
     ollama_messages = []
     for msg in messages:
         content = msg.get("content", "")
@@ -376,11 +378,15 @@ async def call_ollama(messages: list[dict], ollama_url: str, model: str = "llama
         "stream": False
     }
 
+    headers = {"Content-Type": "application/json"}
+    if ollama_key:
+        headers["Authorization"] = f"Bearer {ollama_key}"
+
     async with httpx.AsyncClient(timeout=120) as http_client:
-        r = await http_client.post(url, json=payload)
+        r = await http_client.post(url, json=payload, headers=headers)
         if r.status_code != 200:
             raise Exception(f"Ollama API Error {r.status_code}: {r.text}")
-        return r.json()["message"]["content"].strip()
+        return r.json()["choices"][0]["message"]["content"].strip()
 
 async def describe_image_with_pixtral(image_url: str, mistral_key: str, model: str = "pixtral-12b-2409") -> str:
     """Describe image using Pixtral vision model"""
@@ -460,8 +466,8 @@ async def call_ai(messages: list[dict], cfg: dict, model: str = None) -> str:
         model_name = model[8:]
         return await call_mistral_vision(messages_with_time, cfg.get("mistral_key", ""), model_name)
     else:
-        # Default: Ollama (local)
-        return await call_ollama(messages_with_time, cfg.get("ollama_url", "http://localhost:11434"), model)
+        # Default: Ollama (cloud or local)
+        return await call_ollama(messages_with_time, cfg.get("ollama_url", "https://api.ollama.ai/v1"), cfg.get("ollama_key", ""), model)
 
 async def analyze_lead(conversation: list[dict], cfg: dict, model: str) -> dict:
     try:
@@ -674,7 +680,8 @@ class ConfigModel(BaseModel):
     api_hash: str = ""
     mistral_key: str = ""
     gemini_key: str = ""
-    ollama_url: str = "http://localhost:11434"
+    ollama_key: str = ""
+    ollama_url: str = "https://api.ollama.ai/v1"
     mistral_model: str = "pixtral-12b-2409"
     text_model: str = "llama3.2"
     system_prompt: str = ""
@@ -1004,11 +1011,12 @@ WEB_UI_HTML = '''<!DOCTYPE html>
             <h3 style="margin:20px 0 16px;color:#10b981;">🤖 Mistral AI (Vision)</h3>
             <div class="form-group"><label>Mistral API Key</label><input type="password" id="mistralKey" placeholder="your-api-key"><small>Для изображений (Pixtral) - описывает картинки перед отправкой в текстовую модель</small></div>
             <div class="form-group"><label>Vision Model</label><select id="mistralModel"><option value="pixtral-12b-2409">Pixtral 12B</option><option value="pixtral-large-latest">Pixtral Large</option></select></div>
-            <h3 style="margin:20px 0 16px;color:#10b981;">🦙 Ollama (Local)</h3>
-            <div class="form-group"><label>Ollama URL</label><input type="text" id="ollamaUrl" placeholder="http://localhost:11434"><small>Локальный Ollama сервер</small></div>
+            <h3 style="margin:20px 0 16px;color:#10b981;">🦙 Ollama Cloud</h3>
+            <div class="form-group"><label>Ollama API Key</label><input type="password" id="ollamaKey" placeholder="your-ollama-api-key"><small>Получить на ollama.ai</small></div>
+            <div class="form-group"><label>Ollama URL</label><input type="text" id="ollamaUrl" placeholder="https://api.ollama.ai/v1"><small>Cloud API URL (по умолчанию: https://api.ollama.ai/v1)</small></div>
             <h3 style="margin:20px 0 16px;color:#10b981;">✨ Text Model</h3>
             <div class="form-group"><label>Gemini API Key (опционально)</label><input type="password" id="geminiKey" placeholder="your-gemini-api-key"><small>Если используете Gemini</small></div>
-            <div class="form-group"><label>Text Model</label><input type="text" id="textModel" placeholder="llama3.2"><small>Ollama: llama3.2, llama3.1, mistral, qwen2.5<br>Gemini: gemini-2.5-flash-preview-05-20<br>Mistral: mistral-large-latest</small></div>
+            <div class="form-group"><label>Text Model</label><input type="text" id="textModel" placeholder="llama3.2"><small>Ollama: llama3.2, llama3.1, mistral, qwen2.5<br>Gemini: gemini-2.5-flash-preview-05-20<br>Mistral: mistral:mistral-large-latest</small></div>
             <h3 style="margin:20px 0 16px;color:#10b981;">💬 System Prompt</h3>
             <div class="form-group"><label>Инструкции для AI</label><textarea id="systemPrompt" rows="6" placeholder="Ты Бахром, сотрудник Sog'lom taom..." style="font-size:12px;"></textarea><small>Оставьте пустым для дефолтного промпта</small></div>
             <button class="btn btn-primary" onclick="saveConfig()">💾 Сохранить</button>
@@ -1126,19 +1134,21 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                 document.getElementById('apiHash').value = data.api_hash || '';
                 document.getElementById('mistralKey').value = data.mistral_key || '';
                 document.getElementById('geminiKey').value = data.gemini_key || '';
-                document.getElementById('ollamaUrl').value = data.ollama_url || 'http://localhost:11434';
+                document.getElementById('ollamaKey').value = data.ollama_key || '';
+                document.getElementById('ollamaUrl').value = data.ollama_url || 'https://api.ollama.ai/v1';
                 document.getElementById('mistralModel').value = data.mistral_model || 'pixtral-12b-2409';
                 document.getElementById('textModel').value = data.text_model || 'llama3.2';
                 document.getElementById('systemPrompt').value = data.system_prompt || '';
             } catch(e) {}
         }
-        
+
         async function saveConfig() {
             const cfg = {
                 api_id: document.getElementById('apiId').value,
                 api_hash: document.getElementById('apiHash').value,
                 mistral_key: document.getElementById('mistralKey').value,
                 gemini_key: document.getElementById('geminiKey').value,
+                ollama_key: document.getElementById('ollamaKey').value,
                 ollama_url: document.getElementById('ollamaUrl').value,
                 mistral_model: document.getElementById('mistralModel').value,
                 text_model: document.getElementById('textModel').value,
