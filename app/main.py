@@ -4,7 +4,7 @@ Runs as YOUR Telegram account (Userbot, not Bot)
 Supports images via Mistral Vision API (Pixtral)
 Universal OpenAI-compatible API for text generation
 Lead tracking to Saved Messages
-Web UI Authentication
+Order Management with payment checks, locations, and date verification
 """
 
 import asyncio
@@ -12,10 +12,12 @@ import json
 import os
 import sys
 import base64
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Union, Dict, List
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field, asdict
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,8 +25,8 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import httpx
 from telethon import TelegramClient, events
-from telethon.tl.types import User
-from telethon.tl.types import MessageMediaPhoto
+from telethon.tl.types import User, MessageMediaGeo, MessageMediaGeoLive, MessageMediaPhoto, DocumentAttributeSticker
+from telethon.tl.types import MessageMediaDocument
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -35,6 +37,7 @@ SESSION_PATH = DATA_DIR / "ninja"
 CONFIG_FILE = DATA_DIR / "config.json"
 LOGS_FILE = DATA_DIR / "logs.json"
 LEADS_FILE = DATA_DIR / "leads.json"
+ORDERS_FILE = DATA_DIR / "orders.json"
 IMAGES_DIR = DATA_DIR / "images"
 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -47,25 +50,26 @@ COMPANY_INFO = """
 ПАКЕТЫ:
 - Классик: стандартное меню
 - Индивидуал: можно исключить до 3 продуктов (аллергия/не нравится)
+- Диабет: специальное меню для диабетиков
 
-КАЛОРИИ И ЦЕНЫ (с 1 мая 2026):
-- 1000–1200 ккал — 94 000 сум
-- 1400–1600 ккал — 112 000 сум
-- 1800–2000 ккал — 126 000 сум
-- 2200–2500 ккал — 140 000 сум
-- 3000–3200 ккал — 170 000 сум
+КАЛОРИИ И ЦЕНЫ (актуальные):
+- 1000–1200 ккал — 84 000 сум
+- 1400–1600 ккал — 98 000 сум
+- 1800–2000 ккал — 112 000 сум
+- 2200–2500 ккал — 126 000 сум
 
 ДОСТАВКА:
 - Время: 17:00–22:00 по маршруту
 - 5 махаллинских овкат в порциях
 - Курьер звонит по прибытии
 - Яндекс такси - за счёт клиента
+- Дни доставки: воскр, пн, вт, ср, чт, пт (2 пакета в пт для сб и вс)
 
 ЗАКАЗ:
 - До 21:00 за день до доставки
 - Отмена до 21:00 за день до доставки
 - Минимум 3 дня для первого заказа
-- Предоплата
+- Предоплата обязательна
 
 ПРАВИЛА:
 - 15 дней на изменение списка исключений
@@ -97,6 +101,29 @@ DEFAULT_CONFIG = {
     "model": "",
     "system_prompt": "",
     "lead_prompt": "",
+    # Courier usernames (comma-separated)
+    "couriers": "",
+}
+
+# Days mapping for Russian
+DAYS_RU = {
+    'monday': 'понедельник',
+    'tuesday': 'вторник',
+    'wednesday': 'среда',
+    'thursday': 'четверг',
+    'friday': 'пятница',
+    'saturday': 'суббота',
+    'sunday': 'воскресенье'
+}
+
+DAYS_UZ = {
+    'monday': 'душанба',
+    'tuesday': 'сешанба',
+    'wednesday': 'чоршанба',
+    'thursday': 'пайшанба',
+    'friday': 'жума',
+    'saturday': 'шанба',
+    'sunday': 'якшанба'
 }
 
 DEFAULT_SYSTEM_PROMPT = """Ты Бахром, 35-летний сотрудник компании Sog'lom taom (Соғлом таом) из Ташкента, Узбекистан. Ты работаешь в отделе доставки здорового питания и отвечаешь на сообщения клиентов в Telegram.
@@ -126,7 +153,30 @@ DEFAULT_SYSTEM_PROMPT = """Ты Бахром, 35-летний сотрудник
 - Цены и условия - только актуальные из контекста
 
 ИНФОРМАЦИЯ О КОМПАНИИ (используй при ответах):
-""" + COMPANY_INFO
+""" + COMPANY_INFO + """
+
+ПОВЕДЕНИЕ ПРИ ПОЛУЧЕНИИ ЧЕКА ОПЛАТЫ:
+Когда клиент присылает изображение чека:
+1. Подтверди получение: "Хоп, чек келди. Текшириб чикишамиз..."
+2. После обработки подтверди оплату
+3. Спроси про дату первой доставки если ещё не обсуждали
+
+ПОВЕДЕНИЕ ПРИ ПОЛУЧЕНИИ ЛОКАЦИИ:
+Когда клиент присылает геолокацию:
+1. Подтверди получение локации
+2. Спроси точный адрес (район, массив, дом, квартира, код домофона)
+3. Уточни куда оставить пакет если клиента нет дома
+
+ПОВЕДЕНИЕ ПРИ ОБСУЖДЕНИИ ДАТЫ ДОСТАВКИ:
+Когда клиент называет день доставки:
+1. Проверь что сегодня до 21:00 - если после 21:00, доставка возможна только послезавтра
+2. Проверь что день не суббота (в субботу доставки нет, кухня закрыта)
+3. Если всё ОК - подтверди дату
+4. Напомни про оплату до 21:00
+
+ПОВЕДЕНИЕ ПРИ СТИКЕРАХ:
+Когда клиент присылает стикер - ответь эмодзи или коротким сообщением, как бы ответил реальный человек.
+"""
 
 DEFAULT_LEAD_PROMPT = """Ты анализируешь переписку с клиентом и определяешь, является ли это успешным лидом.
 
@@ -136,6 +186,8 @@ DEFAULT_LEAD_PROMPT = """Ты анализируешь переписку с к�
 ✅ Дал адрес доставки и контакты
 ✅ Оплатил или готов оплатить
 ✅ Спросил про оплату/карты
+✅ Прислал чек об оплате
+✅ Прислал локацию
 
 НЕ ЛИД:
 ❌ Просто спрашивает цены "на будущее"
@@ -147,20 +199,66 @@ DEFAULT_LEAD_PROMPT = """Ты анализируешь переписку с к�
 {
   "is_lead": true/false,
   "confidence": 0.0-1.0,
-  "lead_type": "new_client/repeat_client/consultation/payment_confirmed",
+  "lead_type": "new_client/repeat_client/consultation/payment_confirmed/location_received",
   "client_name": "имя клиента",
   "summary": "краткое описание что нужно сделать",
-  "urgency": "high/medium/low"
+  "urgency": "high/medium/low",
+  "order_details": {
+    "calories": "калории если указаны",
+    "days": "количество дней если указано",
+    "address": "адрес если указан",
+    "phone": "телефон если указан",
+    "delivery_date": "дата доставки если указана",
+    "payment_confirmed": true/false
+  }
 }
 
 Если не лид - верни is_lead: false и остальные поля пустыми.
 """
+
+# ---------------------------------------------------------------------------
+# Data Classes for Order Management
+# ---------------------------------------------------------------------------
+@dataclass
+class ClientOrder:
+    chat_id: int
+    client_name: str
+    phone: str = ""
+    address: str = ""
+    location_url: str = ""
+    calories: str = ""
+    package_type: str = "classic"  # classic, individual, diabetic
+    days: int = 0
+    delivery_date: str = ""
+    price_per_day: int = 0
+    total_price: int = 0
+    payment_confirmed: bool = False
+    check_image_path: str = ""
+    notes: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+    
+    def to_dict(self):
+        return asdict(self)
+
+@dataclass
+class MessageContext:
+    has_image: bool = False
+    has_location: bool = False
+    has_sticker: bool = False
+    location_lat: float = 0.0
+    location_lon: float = 0.0
+    image_description: str = ""
+    sticker_emoji: str = ""
+    is_check: bool = False
+    is_courier: bool = False
 
 # Global state
 HISTORY_LIMIT = 20
 conversation_history: dict[int, list[dict]] = {}
 message_logs: list = []
 leads_log: list = []
+orders: Dict[int, ClientOrder] = {}  # chat_id -> ClientOrder
 
 # Bot instance and state
 client: Optional[TelegramClient] = None
@@ -228,21 +326,39 @@ def save_leads() -> None:
     with open(LEADS_FILE, "w", encoding="utf-8") as f:
         json.dump(leads_log[-200:], f, indent=2, ensure_ascii=False)
 
-def add_log(message: str, sender: str = "System", direction: str = "system", has_image: bool = False):
+def load_orders() -> Dict[int, ClientOrder]:
+    if ORDERS_FILE.exists():
+        try:
+            with open(ORDERS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return {int(k): ClientOrder(**v) for k, v in data.items()}
+        except:
+            pass
+    return {}
+
+def save_orders() -> None:
+    with open(ORDERS_FILE, "w", encoding="utf-8") as f:
+        json.dump({str(k): v.to_dict() for k, v in orders.items()}, f, indent=2, ensure_ascii=False)
+
+def add_log(message: str, sender: str = "System", direction: str = "system", has_image: bool = False, has_location: bool = False):
     display_msg = message[:200] if len(message) > 200 else message
+    prefix = ""
     if has_image:
-        display_msg = "[IMAGE] " + display_msg
+        prefix = "[IMAGE] "
+    if has_location:
+        prefix = "[LOCATION] "
     entry = {
         "id": datetime.now().strftime("%Y%m%d%H%M%S%f"),
         "timestamp": datetime.now().strftime("%H:%M:%S"),
         "sender": sender,
-        "message": display_msg,
+        "message": prefix + display_msg,
         "direction": direction,
-        "has_image": has_image
+        "has_image": has_image,
+        "has_location": has_location
     }
     message_logs.append(entry)
     save_logs()
-    print(f"[{direction}] {sender}: {display_msg}")
+    print(f"[{direction}] {sender}: {prefix}{display_msg}")
 
 def add_lead(lead_data: dict, client_name: str, chat_id: int):
     entry = {
@@ -254,6 +370,128 @@ def add_lead(lead_data: dict, client_name: str, chat_id: int):
     }
     leads_log.append(entry)
     save_leads()
+
+# Price mapping
+PRICE_MAP = {
+    "1000-1200": 84000,
+    "1400-1600": 98000,
+    "1800-2000": 112000,
+    "2200-2500": 126000,
+}
+
+def get_price_for_calories(calories: str) -> int:
+    """Get price based on calorie range"""
+    calories = calories.replace(" ", "").replace("ккал", "").replace("kcal", "")
+    for range_str, price in PRICE_MAP.items():
+        if range_str in calories or calories in range_str:
+            return price
+    # Try to parse numeric value
+    try:
+        cal_val = int(calories.replace("-", "").replace("–", ""))
+        if cal_val <= 1200:
+            return 84000
+        elif cal_val <= 1600:
+            return 98000
+        elif cal_val <= 2000:
+            return 112000
+        else:
+            return 126000
+    except:
+        return 0
+
+def check_delivery_date_possible(requested_date: datetime) -> dict:
+    """
+    Check if delivery is possible on the requested date.
+    Returns dict with 'possible', 'reason', 'next_available'
+    """
+    now = datetime.now()
+    today_deadline = now.replace(hour=21, minute=0, second=0, microsecond=0)
+    
+    # Check if it's Saturday (kitchen closed)
+    if requested_date.weekday() == 5:  # Saturday
+        next_day = requested_date + timedelta(days=1)  # Sunday
+        return {
+            "possible": False,
+            "reason": "В субботу кухня закрыта (день уборки)",
+            "next_available": next_day.strftime("%d.%m.%Y")
+        }
+    
+    # Check deadline
+    if requested_date.date() == now.date():
+        # Delivery today - check if before 21:00
+        if now.hour >= 21:
+            tomorrow = now + timedelta(days=1)
+            if tomorrow.weekday() == 5:  # Skip Saturday
+                tomorrow += timedelta(days=1)
+            return {
+                "possible": False,
+                "reason": "Уже после 21:00, заказы принимаются до 21:00 за день до доставки",
+                "next_available": tomorrow.strftime("%d.%m.%Y")
+            }
+    elif requested_date.date() == (now + timedelta(days=1)).date():
+        # Delivery tomorrow - check if before 21:00 today
+        if now.hour >= 21:
+            day_after = now + timedelta(days=2)
+            if day_after.weekday() == 5:  # Skip Saturday
+                day_after += timedelta(days=1)
+            return {
+                "possible": False,
+                "reason": "Уже после 21:00, завтра доставка невозможна",
+                "next_available": day_after.strftime("%d.%m.%Y")
+            }
+    
+    return {
+        "possible": True,
+        "reason": "OK",
+        "next_available": requested_date.strftime("%d.%m.%Y")
+    }
+
+def parse_delivery_date(text: str) -> Optional[datetime]:
+    """Parse delivery date from text"""
+    text = text.lower()
+    now = datetime.now()
+    
+    # Check for "today"/"сегодня"/"бугун"
+    if any(word in text for word in ['сегодня', 'бугун', 'today', 'сёгун', 'bugun']):
+        return now
+    
+    # Check for "tomorrow"/"завтра"/"эртага"
+    if any(word in text for word in ['завтра', 'эртага', 'tomorrow', 'ertaga']):
+        return now + timedelta(days=1)
+    
+    # Check for day of week
+    day_mapping = {
+        'понедельник': 0, 'душанба': 0, 'monday': 0, 'пн': 0,
+        'вторник': 1, 'сешанба': 1, 'tuesday': 1, 'вт': 1,
+        'среда': 2, 'чоршанба': 2, 'wednesday': 2, 'ср': 2,
+        'четверг': 3, 'пайшанба': 3, 'thursday': 3, 'чт': 3,
+        'пятница': 4, 'жума': 4, 'friday': 4, 'пт': 4,
+        'суббота': 5, 'шанба': 5, 'saturday': 5, 'сб': 5,
+        'воскресенье': 6, 'якшанба': 6, 'sunday': 6, 'вс': 6,
+    }
+    
+    for day_name, day_num in day_mapping.items():
+        if day_name in text:
+            days_ahead = day_num - now.weekday()
+            if days_ahead <= 0:
+                days_ahead += 7
+            return now + timedelta(days=days_ahead)
+    
+    # Check for date patterns like "15.05", "15 мая", "15-may"
+    date_pattern = r'(\d{1,2})[.\s/-](\d{1,2})'
+    match = re.search(date_pattern, text)
+    if match:
+        day = int(match.group(1))
+        month = int(match.group(2))
+        try:
+            date = now.replace(day=day, month=month)
+            if date < now:
+                date = date.replace(year=date.year + 1)
+            return date
+        except:
+            pass
+    
+    return None
 
 async def download_and_encode_image(msg) -> Optional[str]:
     global client
@@ -271,14 +509,29 @@ async def download_and_encode_image(msg) -> Optional[str]:
                 mime_type = mime_types.get(ext, 'image/jpeg')
                 base64_data = base64.b64encode(image_data).decode('utf-8')
                 data_url = f"data:{mime_type};base64,{base64_data}"
-                try:
-                    os.remove(file_path)
-                except:
-                    pass
+                # Keep file for order records
                 return data_url
         return None
     except Exception as e:
         print(f"Error downloading image: {e}")
+        return None
+
+async def save_image_for_order(msg, chat_id: int) -> Optional[str]:
+    """Save image and return file path"""
+    global client
+    try:
+        if not msg.media:
+            return None
+        if isinstance(msg.media, MessageMediaPhoto):
+            photo = msg.media.photo
+            if photo:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                file_path = IMAGES_DIR / f"check_{chat_id}_{timestamp}.jpg"
+                await client.download_media(photo, file_path)
+                return str(file_path)
+        return None
+    except Exception as e:
+        print(f"Error saving image: {e}")
         return None
 
 # ---------------------------------------------------------------------------
@@ -293,7 +546,19 @@ async def describe_image_with_pixtral(image_url: str, mistral_key: str, model: s
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": "Опиши это изображение подробно на русском языке. Что на нём видно?"},
+                {"type": "text", "text": """Проанализируй это изображение. Это может быть:
+1. Чек об оплате (перевод денег)
+2. Скриншот приложения банка
+3. Фото продукта
+4. Другое
+
+Если это чек/перевод, укажи:
+- Сумму перевода
+- Дату и время если видны
+- Номер карты получателя если виден
+- Имя получателя если видно
+
+Отвечай на русском языке кратко и по делу."""},
                 {"type": "image_url", "image_url": {"url": image_url}}
             ]
         }
@@ -356,7 +621,10 @@ async def call_ai(messages: list[dict], cfg: dict) -> str:
     
     # Add current date/time context
     now = datetime.now()
-    time_context = f"\n\n[ТЕКУЩЕЕ ВРЕМЯ: {now.strftime('%d.%m.%Y %H:%M')} ({now.strftime('%A')})]"
+    time_context = f"\n\n[ТЕКУЩЕЕ ВРЕМЯ: {now.strftime('%d.%m.%Y %H:%M')} ({DAYS_RU.get(now.strftime('%A').lower(), now.strftime('%A'))})]"
+    time_context += f"\n[СЕЙЧАС {now.strftime('%H:%M')}, ДЕДЛАЙН ЗАКАЗА НА ЗАВТРА: 21:00]"
+    if now.hour >= 21:
+        time_context += "\n[ВНИМАНИЕ: Уже после 21:00, заказы на завтра не принимаются!]"
     
     # Add time context to system message
     messages_with_time = messages.copy()
@@ -416,7 +684,6 @@ async def analyze_lead(conversation: list[dict], cfg: dict) -> dict:
             {"role": "user", "content": f"Проанализируй переписку:\n\n{json.dumps(conversation, ensure_ascii=False, indent=2)}"}
         ]
         result = await call_ai(messages, cfg)
-        import re
         json_match = re.search(r'\{[^{}]*\}', result, re.DOTALL)
         if json_match:
             return json.loads(json_match.group())
@@ -425,9 +692,18 @@ async def analyze_lead(conversation: list[dict], cfg: dict) -> dict:
         print(f"Lead analysis error: {e}")
         return {"is_lead": False}
 
-def add_to_history(chat_id: int, role: str, content: Union[str, list]) -> None:
+def add_to_history(chat_id: int, role: str, content: Union[str, list], context: MessageContext = None) -> None:
     if chat_id not in conversation_history:
         conversation_history[chat_id] = []
+    
+    # Add context info to content
+    if context:
+        if isinstance(content, str):
+            if context.has_location:
+                content = f"[ЛОКАЦИЯ: {context.location_lat}, {context.location_lon}]\n{content}"
+            if context.has_sticker:
+                content = f"[СТИКЕР: {context.sticker_emoji}]\n{content}"
+    
     conversation_history[chat_id].append({"role": role, "content": content})
     if len(conversation_history[chat_id]) > HISTORY_LIMIT:
         conversation_history[chat_id] = conversation_history[chat_id][-HISTORY_LIMIT:]
@@ -439,8 +715,96 @@ def get_conversation_messages(chat_id: int, system_prompt: str) -> list[dict]:
     return messages
 
 # ---------------------------------------------------------------------------
+# Courier Detection
+# ---------------------------------------------------------------------------
+def is_courier(sender: User, cfg: dict) -> bool:
+    """Check if sender is a courier based on config"""
+    couriers = cfg.get("couriers", "")
+    if not couriers:
+        return False
+    courier_list = [c.strip().lower().replace("@", "") for c in couriers.split(",")]
+    sender_username = (sender.username or "").lower()
+    sender_name = (sender.first_name or "").lower()
+    return any(c in sender_username or c in sender_name for c in courier_list)
+
+async def handle_courier_message(chat_id: int, sender: User, message):
+    """Handle messages from couriers differently"""
+    global client, config
+    
+    sender_name = sender.first_name or sender.last_name or str(sender.id)
+    text = (message.text or "").strip()
+    
+    add_log(f"[КУРЬЕР] {text}", sender_name, "courier")
+    
+    # Simple acknowledgment for couriers
+    try:
+        # Check for delivery confirmation patterns
+        if any(word in text.lower() for word in ['доставил', 'отдал', ' delivered', 'етказдим']):
+            await client.send_message(chat_id, "Хоп, отмечаем! Рахмат 👍")
+            # Also send to saved messages
+            me = await client.get_me()
+            await client.send_message(me.id, f"📦 КУРЬЕР ДОСТАВИЛ\n\n👤 {sender_name}\n📱 @{sender.username or 'нет username'}\n🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n💬 {text}")
+        elif any(word in text.lower() for word in ['не нашел', 'не открыл', 'не ответил', 'no answer']):
+            await client.send_message(chat_id, "Понял, щас позвоню клиенту")
+            # Notify in saved messages
+            me = await client.get_me()
+            await client.send_message(me.id, f"⚠️ ПРОБЛЕМА С ДОСТАВКОЙ\n\n👤 {sender_name}\n💬 {text}\n🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}")
+        else:
+            await client.send_message(chat_id, "Принял, спасибо")
+    except Exception as e:
+        add_log(f"Ошибка ответа курьеру: {e}", "System", "error")
+
+# ---------------------------------------------------------------------------
 # Telegram Bot Logic
 # ---------------------------------------------------------------------------
+async def send_order_to_saved_messages(order: ClientOrder, check_image_data: str = None):
+    """Send complete order info to Saved Messages"""
+    global client
+    try:
+        me = await client.get_me()
+        
+        # Build order message
+        message = f"""✅ ЗАКАЗ ОФОРМЛЕН
+
+👤 Клиент: {order.client_name}
+📱 Телефон: {order.phone or 'не указан'}
+📍 Адрес: {order.address or 'не указан'}
+🗺 Локация: {order.location_url or 'не указана'}
+
+📦 Пакет: {order.package_type}
+🔥 Калории: {order.calories}
+📅 Дней: {order.days}
+🚚 Доставка: {order.delivery_date}
+
+💰 Цена за день: {order.price_per_day:,} сум
+💰 Итого: {order.total_price:,} сум
+
+💳 Оплата: {'✅ Подтверждена' if order.payment_confirmed else '⏳ Ожидает'}
+
+📝 Заметки: {order.notes or 'нет'}
+
+🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}
+"""
+        
+        # Send text message
+        await client.send_message(me.id, message)
+        
+        # Send location if available
+        if order.location_url:
+            # Extract coordinates from URL
+            match = re.search(r'q=([0-9.]+),([0-9.]+)', order.location_url)
+            if match:
+                lat, lon = float(match.group(1)), float(match.group(2))
+                await client.send_message(me.id, f"🗺 Локация клиента: {order.location_url}")
+        
+        # Send check image if available
+        if check_image_data:
+            await client.send_message(me.id, "[Чек об оплате прикреплён выше]")
+        
+        add_log(f"Заказ сохранён: {order.client_name}", "System", "order")
+    except Exception as e:
+        add_log(f"Ошибка сохранения заказа: {e}", "System", "error")
+
 async def send_to_saved_messages(lead_data: dict, client_name: str, chat_id: int):
     global client
     try:
@@ -467,46 +831,150 @@ async def send_to_saved_messages(lead_data: dict, client_name: str, chat_id: int
         add_log(f"Ошибка сохранения лида: {e}", "System", "error")
 
 async def handle_message(chat_id: int, sender: User, message):
-    global client, config, message_count, lead_count
+    global client, config, message_count, lead_count, orders
+    
     sender_name = sender.first_name or sender.last_name or str(sender.id)
     text = (message.text or "").strip()
-    has_image = False
-    image_url = None
-
+    
+    # Create message context
+    context = MessageContext()
+    
+    # Check for location
     if message.media:
-        image_url = await download_and_encode_image(message)
-        if image_url:
-            has_image = True
-
-    if not text and not has_image:
+        if isinstance(message.media, (MessageMediaGeo, MessageMediaGeoLive)):
+            context.has_location = True
+            geo = message.media.geo
+            context.location_lat = geo.lat
+            context.location_lon = geo.long
+            add_log(f"Геолокация: {geo.lat}, {geo.long}", sender_name, "incoming", has_location=True)
+        elif isinstance(message.media, MessageMediaPhoto):
+            # Handle image
+            image_url = await download_and_encode_image(message)
+            if image_url:
+                context.has_image = True
+                context.image_url = image_url
+                # Save image for order
+                check_path = await save_image_for_order(message, chat_id)
+                if check_path:
+                    if chat_id not in orders:
+                        orders[chat_id] = ClientOrder(
+                            chat_id=chat_id,
+                            client_name=sender_name,
+                            created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        )
+                    orders[chat_id].check_image_path = check_path
+                    save_orders()
+        elif hasattr(message.media, 'document'):
+            # Check for sticker
+            doc = message.media.document
+            if doc and hasattr(doc, 'attributes'):
+                for attr in doc.attributes:
+                    if isinstance(attr, DocumentAttributeSticker):
+                        context.has_sticker = True
+                        context.sticker_emoji = attr.alt or "👍"
+                        add_log(f"Стикер: {context.sticker_emoji}", sender_name, "incoming")
+                        break
+    
+    if not text and not context.has_image and not context.has_location and not context.has_sticker:
         return
-
-    add_log(text if text else "(изображение)", sender_name, "incoming", has_image)
-
-    if has_image:
+    
+    if not context.has_location and not context.has_sticker:
+        add_log(text if text else "(изображение)", sender_name, "incoming", has_image=context.has_image)
+    
+    # Update or create order
+    if chat_id not in orders:
+        orders[chat_id] = ClientOrder(
+            chat_id=chat_id,
+            client_name=sender_name,
+            created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        )
+    
+    order = orders[chat_id]
+    order.updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Update order details from message
+    if context.has_location:
+        order.location_url = f"https://maps.google.com/maps?q={context.location_lat},{context.location_lon}"
+    
+    # Parse delivery date from message
+    delivery_date = parse_delivery_date(text)
+    if delivery_date:
+        date_check = check_delivery_date_possible(delivery_date)
+        if date_check["possible"]:
+            order.delivery_date = delivery_date.strftime("%d.%m.%Y")
+        else:
+            # Add date issue to context for AI
+            text += f"\n[СИСТЕМА: {date_check['reason']}. Ближайшая дата: {date_check['next_available']}]"
+    
+    # Parse calories from message
+    cal_match = re.search(r'(\d{4}[\s-]?\d{3,4})\s*(ккал|kcal)?', text, re.IGNORECASE)
+    if cal_match:
+        order.calories = cal_match.group(1).replace(" ", "")
+        order.price_per_day = get_price_for_calories(order.calories)
+    
+    # Parse days count
+    days_match = re.search(r'(\d+)\s*(день|дней|кунь|кун)', text, re.IGNORECASE)
+    if days_match:
+        order.days = int(days_match.group(1))
+        order.total_price = order.price_per_day * order.days
+    
+    # Parse phone number
+    phone_match = re.search(r'(\+?998\d{9})', text)
+    if phone_match:
+        order.phone = phone_match.group(1)
+    
+    # Parse address (simple pattern for Uzbek addresses)
+    if not order.address:
+        # Look for district + address pattern
+        addr_patterns = [
+            r'(район|массив|туман).*?(дом|уй|кв|квартира).*?\d+',
+            r'(Чилонзор|Сергели|Юнусабад|Мирабад|Яккасарай|Шайхантаур|Учтепа|Алмазар|Яшнобод|Бектемир).*?\d+',
+        ]
+        for pattern in addr_patterns:
+            addr_match = re.search(pattern, text, re.IGNORECASE)
+            if addr_match:
+                order.address = addr_match.group(0)
+                break
+    
+    save_orders()
+    
+    # Build message for AI
+    if context.has_image:
         content = []
         if text:
             content.append({"type": "text", "text": text})
-        content.append({"type": "image_url", "image_url": {"url": image_url}})
-        add_to_history(chat_id, "user", content)
+        content.append({"type": "image_url", "image_url": {"url": context.image_url}})
+        add_to_history(chat_id, "user", content, context)
+    elif context.has_sticker:
+        add_to_history(chat_id, "user", f"[СТИКЕР: {context.sticker_emoji}] {text}", context)
     else:
-        add_to_history(chat_id, "user", text)
-
+        add_to_history(chat_id, "user", text, context)
+    
     try:
         async with client.action(chat_id, "typing"):
-            add_log("Думаю...", "System", "system")
             messages = get_conversation_messages(chat_id, config.get("system_prompt", DEFAULT_SYSTEM_PROMPT))
             reply = await call_ai(messages, config)
     except Exception as e:
         add_log(f"AI Error: {e}", "System", "error")
         return
-
+    
     try:
         add_to_history(chat_id, "assistant", reply)
         await client.send_message(chat_id, reply)
         message_count += 1
         add_log(reply, sender_name, "outgoing")
-
+        
+        # Check for payment confirmation in reply
+        if any(word in reply.lower() for word in ['отметили', 'приняли', 'подтвержд', 'хоп', 'рахмат', 'спасибо']):
+            if any(word in reply.lower() for word in ['чек', 'оплата', 'оплат', 'перевод']):
+                order.payment_confirmed = True
+                save_orders()
+                
+                # If we have all order details, send to saved messages
+                if order.payment_confirmed and order.phone and order.calories:
+                    await send_order_to_saved_messages(order, order.check_image_path)
+        
+        # Analyze for leads every 3 messages
         msg_count = len(conversation_history.get(chat_id, []))
         if msg_count >= 3 and msg_count % 3 == 0:
             try:
@@ -518,11 +986,29 @@ async def handle_message(chat_id: int, sender: User, message):
                         conv_for_analysis.append({"role": msg["role"], "content": " ".join(text_parts) + " [изображение]"})
                     else:
                         conv_for_analysis.append(msg)
-
+                
                 lead_result = await analyze_lead(conv_for_analysis, config)
                 if lead_result.get("is_lead") and lead_result.get("confidence", 0) >= 0.6:
                     add_lead(lead_result, sender_name, chat_id)
                     lead_count += 1
+                    
+                    # Update order from lead analysis
+                    order_details = lead_result.get("order_details", {})
+                    if order_details:
+                        if order_details.get("calories"):
+                            order.calories = order_details["calories"]
+                        if order_details.get("days"):
+                            order.days = int(order_details["days"])
+                        if order_details.get("address"):
+                            order.address = order_details["address"]
+                        if order_details.get("phone"):
+                            order.phone = order_details["phone"]
+                        if order_details.get("delivery_date"):
+                            order.delivery_date = order_details["delivery_date"]
+                        if order_details.get("payment_confirmed"):
+                            order.payment_confirmed = True
+                        save_orders()
+                    
                     await send_to_saved_messages(lead_result, sender_name, chat_id)
             except Exception as e:
                 print(f"Lead analysis error: {e}")
@@ -549,6 +1035,12 @@ async def run_bot():
             sender = await event.get_sender()
             if not isinstance(sender, User) or sender.is_self or getattr(sender, 'bot', False):
                 return
+            
+            # Check if sender is courier
+            if is_courier(sender, config):
+                await handle_courier_message(event.chat_id, sender, event.message)
+                return
+            
             await handle_message(event.chat_id, sender, event.message)
 
         add_log("Подключение к Telegram...", "System", "system")
@@ -576,7 +1068,11 @@ async def run_bot():
                         add_log(f"{dialog.unread_count} сообщений от {sender_name}", "System", "system")
                         async for message in client.iter_messages(dialog.entity, limit=dialog.unread_count, reverse=True):
                             if not message.out:
-                                await handle_message(dialog.id, entity, message)
+                                # Check if courier
+                                if is_courier(entity, config):
+                                    await handle_courier_message(dialog.id, entity, message)
+                                else:
+                                    await handle_message(dialog.id, entity, message)
                                 unread_count += 1
                         await client.send_read_acknowledge(dialog.entity)
                 except Exception as e:
@@ -624,6 +1120,7 @@ class ConfigModel(BaseModel):
     model: str = ""
     system_prompt: str = ""
     lead_prompt: str = ""
+    couriers: str = ""
 
 class PhoneModel(BaseModel):
     phone: str
@@ -636,9 +1133,10 @@ class CodeModel(BaseModel):
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global message_logs, leads_log, config
+    global message_logs, leads_log, orders, config
     message_logs = load_logs()
     leads_log = load_leads()
+    orders = load_orders()
     config = load_config()
     yield
 
@@ -661,7 +1159,8 @@ async def get_status():
         "running": bot_running,
         "username": bot_username,
         "message_count": message_count,
-        "lead_count": lead_count
+        "lead_count": lead_count,
+        "active_orders": len([o for o in orders.values() if not o.payment_confirmed or o.delivery_date])
     }
 
 @app.get("/api/config")
@@ -749,6 +1248,12 @@ async def send_code(data: CodeModel):
             sender = await event.get_sender()
             if not isinstance(sender, User) or sender.is_self or getattr(sender, 'bot', False):
                 return
+            
+            # Check if courier
+            if is_courier(sender, config):
+                await handle_courier_message(event.chat_id, sender, event.message)
+                return
+            
             await handle_message(event.chat_id, sender, event.message)
 
         add_log("🚀 Юзербот работает!", "System", "success")
@@ -780,7 +1285,11 @@ async def process_unread_messages():
                     add_log(f"{dialog.unread_count} сообщений от {sender_name}", "System", "system")
                     async for message in client.iter_messages(dialog.entity, limit=dialog.unread_count, reverse=True):
                         if not message.out:
-                            await handle_message(dialog.id, entity, message)
+                            # Check if courier
+                            if is_courier(entity, config):
+                                await handle_courier_message(dialog.id, entity, message)
+                            else:
+                                await handle_message(dialog.id, entity, message)
                             unread_count += 1
                     await client.send_read_acknowledge(dialog.entity)
             except Exception as e:
@@ -813,6 +1322,35 @@ async def clear_leads():
     save_leads()
     return {"success": True}
 
+@app.get("/api/orders")
+async def get_orders():
+    return {str(k): v.to_dict() for k, v in orders.items()}
+
+@app.get("/api/orders/{chat_id}")
+async def get_order(chat_id: int):
+    if chat_id in orders:
+        return orders[chat_id].to_dict()
+    return {"error": "Order not found"}
+
+@app.delete("/api/orders")
+async def clear_orders():
+    global orders
+    orders = {}
+    save_orders()
+    return {"success": True}
+
+@app.post("/api/orders/{chat_id}/confirm")
+async def confirm_order_payment(chat_id: int):
+    if chat_id in orders:
+        orders[chat_id].payment_confirmed = True
+        orders[chat_id].updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        save_orders()
+        
+        # Send to saved messages
+        await send_order_to_saved_messages(orders[chat_id])
+        return {"success": True}
+    return {"error": "Order not found"}
+
 # ---------------------------------------------------------------------------
 # Web UI (embedded)
 # ---------------------------------------------------------------------------
@@ -825,13 +1363,13 @@ WEB_UI_HTML = '''<!DOCTYPE html>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); min-height: 100vh; color: #fff; padding: 20px; }
-        .container { max-width: 900px; margin: 0 auto; }
+        .container { max-width: 1100px; margin: 0 auto; }
         .header { display: flex; align-items: center; justify-content: space-between; padding: 15px 20px; background: rgba(255,255,255,0.05); border-radius: 12px; margin-bottom: 20px; }
         .header h1 { display: flex; align-items: center; gap: 10px; font-size: 22px; }
         .status-badge { padding: 6px 14px; border-radius: 16px; font-weight: 600; font-size: 13px; }
         .status-online { background: #10b981; }
         .status-offline { background: #6b7280; }
-        .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+        .stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 20px; }
         .stat-card { background: rgba(255,255,255,0.05); border-radius: 10px; padding: 15px; text-align: center; }
         .stat-card .value { font-size: 20px; font-weight: bold; color: #10b981; }
         .stat-card .label { color: #9ca3af; font-size: 12px; margin-top: 4px; }
@@ -868,6 +1406,8 @@ WEB_UI_HTML = '''<!DOCTYPE html>
         .log-error { border-left: 3px solid #ef4444; }
         .log-success { border-left: 3px solid #10b981; }
         .log-lead { border-left: 3px solid #f59e0b; background: rgba(245, 158, 11, 0.05); }
+        .log-order { border-left: 3px solid #8b5cf6; background: rgba(139, 92, 246, 0.05); }
+        .log-courier { border-left: 3px solid #06b6d4; background: rgba(6, 182, 212, 0.05); }
         .info-box { background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 8px; padding: 12px 16px; margin-bottom: 20px; font-size: 13px; color: #93c5fd; }
         .warning-box { background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.3); border-radius: 8px; padding: 12px 16px; margin-bottom: 20px; font-size: 13px; color: #fcd34d; }
         .auth-modal { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center; }
@@ -883,9 +1423,15 @@ WEB_UI_HTML = '''<!DOCTYPE html>
         .lead-type { font-size: 11px; padding: 2px 8px; background: rgba(245,158,11,0.2); border-radius: 4px; }
         .lead-summary { color: #9ca3af; font-size: 12px; margin-bottom: 6px; }
         .lead-meta { display: flex; gap: 15px; font-size: 11px; color: #6b7280; }
-        .urgency-high { color: #ef4444; }
-        .urgency-medium { color: #f59e0b; }
-        .urgency-low { color: #10b981; }
+        .order-card { background: rgba(0,0,0,0.2); border-radius: 8px; padding: 12px; margin-bottom: 10px; border-left: 4px solid #8b5cf6; }
+        .order-header { display: flex; justify-content: space-between; margin-bottom: 8px; }
+        .order-client { font-weight: 600; color: #8b5cf6; }
+        .order-status { font-size: 11px; padding: 2px 8px; border-radius: 4px; }
+        .order-status.paid { background: rgba(16, 185, 129, 0.2); color: #10b981; }
+        .order-status.pending { background: rgba(245, 158, 11, 0.2); color: #f59e0b; }
+        .order-details { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; font-size: 12px; color: #9ca3af; }
+        .order-detail { display: flex; gap: 4px; }
+        .order-detail span:first-child { color: #6b7280; }
         .section-title { font-size: 16px; font-weight: 600; margin-bottom: 12px; color: #10b981; display: flex; align-items: center; gap: 8px; }
         .divider { height: 1px; background: rgba(255,255,255,0.1); margin: 20px 0; }
         ::-webkit-scrollbar { width: 6px; }
@@ -922,6 +1468,10 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                 <div class="label">Лидов</div>
             </div>
             <div class="stat-card">
+                <div class="value" id="statOrders">0</div>
+                <div class="label">Заказов</div>
+            </div>
+            <div class="stat-card">
                 <div class="value" id="statUsername">-</div>
                 <div class="label">Аккаунт</div>
             </div>
@@ -937,6 +1487,7 @@ WEB_UI_HTML = '''<!DOCTYPE html>
             <button class="tab" onclick="showPanel('config')">⚙️ Настройки</button>
             <button class="tab" onclick="showPanel('logs')">📋 Логи</button>
             <button class="tab" onclick="showPanel('leads')">🎯 Лиды</button>
+            <button class="tab" onclick="showPanel('orders')">📦 Заказы</button>
         </div>
 
         <!-- Control Panel -->
@@ -963,62 +1514,68 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                 <div class="form-group">
                     <label>Model</label>
                     <input type="text" id="quickModel" placeholder="gpt-4o-mini">
-                    <small>Например: llama3.2, gpt-4o-mini</small>
                 </div>
             </div>
             <div class="form-group">
-                <label>API Key</label>
+                <label>API Key (опционально)</label>
                 <input type="password" id="quickApiKey" placeholder="sk-...">
             </div>
             <button class="btn btn-primary" onclick="saveQuickConfig()">💾 Сохранить</button>
+
+            <div class="divider"></div>
+
+            <div class="section-title">🚚 Курьеры</div>
+            <div class="form-group">
+                <label>Юзернеймы курьеров (через запятую)</label>
+                <input type="text" id="couriersInput" placeholder="@courier1, @courier2">
+                <small>Сообщения от курьеров обрабатываются отдельно</small>
+            </div>
+            <button class="btn btn-primary" onclick="saveCouriers()">💾 Сохранить</button>
         </div>
 
         <!-- Config Panel -->
         <div id="panel-config" class="panel">
-            <div class="warning-box">
-                ⚠️ <strong>Pixtral (Mistral)</strong> используется для описания изображений. Без него картинки не будут анализироваться.
-            </div>
-
-            <div class="section-title">🖼️ Vision API (для изображений)</div>
-            <div class="form-row">
-                <div class="form-group">
-                    <label>Mistral API Key (Pixtral)</label>
-                    <input type="password" id="mistralKey" placeholder="Для обработки изображений">
-                </div>
-                <div class="form-group">
-                    <label>Pixtral Model</label>
-                    <input type="text" id="mistralModel" value="pixtral-12b-2409">
-                </div>
-            </div>
-
-            <div class="divider"></div>
-
-            <div class="section-title">🤖 Text API (OpenAI-compatible)</div>
-            <div class="form-group">
-                <label>API Base URL</label>
-                <input type="text" id="apiBaseUrl" placeholder="https://api.openai.com/v1">
-                <small>Любой OpenAI-совместимый endpoint</small>
-            </div>
-            <div class="form-group">
-                <label>API Key</label>
-                <input type="password" id="apiKey" placeholder="Ваш API ключ">
-            </div>
-            <div class="form-group">
-                <label>Model Name</label>
-                <input type="text" id="modelName" placeholder="gpt-4o-mini, llama3.2, mistral-large-latest...">
-            </div>
-
-            <div class="divider"></div>
-
-            <div class="section-title">📱 Telegram API</div>
+            <div class="section-title">🔑 Telegram API</div>
             <div class="form-row">
                 <div class="form-group">
                     <label>API ID</label>
-                    <input type="text" id="apiId">
+                    <input type="text" id="apiId" placeholder="12345678">
+                    <small>Получите на my.telegram.org</small>
                 </div>
                 <div class="form-group">
                     <label>API Hash</label>
-                    <input type="text" id="apiHash">
+                    <input type="password" id="apiHash" placeholder="abc123...">
+                </div>
+            </div>
+
+            <div class="divider"></div>
+
+            <div class="section-title">🤖 AI Model</div>
+            <div class="form-group">
+                <label>API Base URL</label>
+                <input type="text" id="apiBaseUrl" placeholder="https://api.openai.com/v1">
+            </div>
+            <div class="form-group">
+                <label>API Key</label>
+                <input type="password" id="apiKey" placeholder="sk-...">
+            </div>
+            <div class="form-group">
+                <label>Model</label>
+                <input type="text" id="modelName" placeholder="gpt-4o-mini">
+            </div>
+
+            <div class="divider"></div>
+
+            <div class="section-title">🖼 Vision API (Mistral/Pixtral)</div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Mistral API Key</label>
+                    <input type="password" id="mistralKey" placeholder="...">
+                    <small>Для обработки изображений</small>
+                </div>
+                <div class="form-group">
+                    <label>Vision Model</label>
+                    <input type="text" id="mistralModel" value="pixtral-12b-2409">
                 </div>
             </div>
 
@@ -1026,99 +1583,255 @@ WEB_UI_HTML = '''<!DOCTYPE html>
 
             <div class="section-title">🎭 System Prompt</div>
             <div class="form-group">
-                <label>Промпт для AI (персонаж и стиль)</label>
+                <label>Промпт для AI</label>
                 <textarea id="systemPrompt" rows="10" style="font-family: monospace; font-size: 12px;"></textarea>
             </div>
 
-            <div style="margin-top: 20px;">
-                <button class="btn btn-primary" onclick="saveConfig()">💾 Сохранить настройки</button>
-            </div>
+            <button class="btn btn-primary" onclick="saveFullConfig()">💾 Сохранить настройки</button>
         </div>
 
         <!-- Logs Panel -->
         <div id="panel-logs" class="panel">
-            <div style="margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center;">
-                <h3>📋 Логи сообщений</h3>
-                <div>
-                    <button class="btn btn-secondary" onclick="refreshLogs()">🔄 Обновить</button>
-                    <button class="btn btn-danger" onclick="clearLogs()">🗑️ Очистить</button>
-                </div>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                <div class="section-title" style="margin: 0;">📋 Логи сообщений</div>
+                <button class="btn btn-secondary" onclick="clearLogs()">🗑 Очистить</button>
             </div>
-            <div id="logsContainer" class="logs"></div>
+            <div class="logs" id="logsContainer">
+                <div style="text-align: center; color: #6b7280; padding: 20px;">Загрузка...</div>
+            </div>
         </div>
 
         <!-- Leads Panel -->
         <div id="panel-leads" class="panel">
-            <div style="margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center;">
-                <h3>🎯 Найденные лиды</h3>
-                <div>
-                    <button class="btn btn-secondary" onclick="refreshLeads()">🔄 Обновить</button>
-                    <button class="btn btn-danger" onclick="clearLeads()">🗑️ Очистить</button>
-                </div>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                <div class="section-title" style="margin: 0;">🎯 Лиды</div>
+                <button class="btn btn-secondary" onclick="clearLeads()">🗑 Очистить</button>
             </div>
-            <div id="leadsContainer"></div>
+            <div id="leadsContainer">
+                <div style="text-align: center; color: #6b7280; padding: 20px;">Загрузка...</div>
+            </div>
+        </div>
+
+        <!-- Orders Panel -->
+        <div id="panel-orders" class="panel">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                <div class="section-title" style="margin: 0;">📦 Активные заказы</div>
+                <button class="btn btn-secondary" onclick="refreshOrders()">🔄 Обновить</button>
+            </div>
+            <div id="ordersContainer">
+                <div style="text-align: center; color: #6b7280; padding: 20px;">Загрузка...</div>
+            </div>
         </div>
     </div>
 
     <script>
-        let authStep = 'idle';
+        let authStep = 'phone';
+        let refreshInterval;
 
-        // Initialize
-        document.addEventListener('DOMContentLoaded', () => {
-            loadConfig();
-            refreshStatus();
-        });
-
-        function showPanel(name) {
-            document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-            document.getElementById('panel-' + name).classList.add('active');
-            event.target.classList.add('active');
-            
-            if (name === 'logs') refreshLogs();
-            if (name === 'leads') refreshLeads();
+        async function refreshStatus() {
+            try {
+                const r = await fetch('/api/status');
+                const d = await r.json();
+                
+                document.getElementById('statMessages').textContent = d.message_count;
+                document.getElementById('statLeads').textContent = d.lead_count;
+                document.getElementById('statOrders').textContent = d.active_orders || 0;
+                
+                const badge = document.getElementById('statusBadge');
+                if (d.running) {
+                    badge.textContent = '🟢 ' + (d.username || 'Онлайн');
+                    badge.className = 'status-badge status-online';
+                    document.getElementById('btnStart').disabled = true;
+                    document.getElementById('btnStop').disabled = false;
+                    document.getElementById('statUsername').textContent = d.username || '-';
+                } else {
+                    badge.textContent = '🔴 Оффлайн';
+                    badge.className = 'status-badge status-offline';
+                    document.getElementById('btnStart').disabled = false;
+                    document.getElementById('btnStop').disabled = true;
+                }
+            } catch (e) {
+                console.error('Status error:', e);
+            }
         }
 
         async function loadConfig() {
             try {
                 const r = await fetch('/api/config');
-                const data = await r.json();
+                const d = await r.json();
                 
-                // Vision API
-                document.getElementById('mistralKey').value = data.mistral_key || '';
-                document.getElementById('mistralModel').value = data.mistral_model || 'pixtral-12b-2409';
+                document.getElementById('apiId').value = d.api_id || '';
+                document.getElementById('apiHash').value = d.api_hash || '';
+                document.getElementById('apiBaseUrl').value = d.api_base_url || '';
+                document.getElementById('apiKey').value = d.api_key || '';
+                document.getElementById('modelName').value = d.model || '';
+                document.getElementById('mistralKey').value = d.mistral_key || '';
+                document.getElementById('mistralModel').value = d.mistral_model || 'pixtral-12b-2409';
+                document.getElementById('systemPrompt').value = d.system_prompt || '';
+                document.getElementById('couriersInput').value = d.couriers || '';
                 
-                // Text API
-                document.getElementById('apiBaseUrl').value = data.api_base_url || '';
-                document.getElementById('apiKey').value = data.api_key || '';
-                document.getElementById('modelName').value = data.model || '';
+                document.getElementById('quickBaseUrl').value = d.api_base_url || '';
+                document.getElementById('quickModel').value = d.model || '';
+                document.getElementById('quickApiKey').value = d.api_key || '';
                 
-                // Quick settings
-                document.getElementById('quickBaseUrl').value = data.api_base_url || '';
-                document.getElementById('quickApiKey').value = data.api_key || '';
-                document.getElementById('quickModel').value = data.model || '';
-                
-                // Telegram
-                document.getElementById('apiId').value = data.api_id || '';
-                document.getElementById('apiHash').value = data.api_hash || '';
-                
-                // Prompts
-                document.getElementById('systemPrompt').value = data.system_prompt || '';
+                document.getElementById('statModel').textContent = d.model ? d.model.substring(0, 10) : '-';
             } catch (e) {
-                console.error('Load config error:', e);
+                console.error('Config error:', e);
             }
         }
 
-        async function saveConfig() {
+        async function startBot() {
+            const btn = document.getElementById('btnStart');
+            btn.disabled = true;
+            btn.textContent = '⏳ Запуск...';
+            
+            try {
+                await fetch('/api/start', { method: 'POST' });
+                setTimeout(checkAuth, 1000);
+            } catch (e) {
+                console.error('Start error:', e);
+                btn.disabled = false;
+                btn.textContent = '▶️ Запустить';
+            }
+        }
+
+        async function stopBot() {
+            try {
+                await fetch('/api/stop', { method: 'POST' });
+                refreshStatus();
+            } catch (e) {
+                console.error('Stop error:', e);
+            }
+        }
+
+        async function checkAuth() {
+            try {
+                const r = await fetch('/api/auth/status');
+                const d = await r.json();
+                
+                if (d.step === 'phone' || d.step === 'code') {
+                    showAuthModal(d.step, d.error);
+                } else if (d.step === 'done') {
+                    hideAuthModal();
+                    refreshStatus();
+                } else {
+                    setTimeout(checkAuth, 2000);
+                }
+            } catch (e) {
+                setTimeout(checkAuth, 2000);
+            }
+        }
+
+        function showAuthModal(step, error) {
+            authStep = step;
+            const modal = document.getElementById('authModal');
+            const title = document.getElementById('authTitle');
+            const input = document.getElementById('authInput');
+            const errorEl = document.getElementById('authError');
+            
+            modal.classList.add('show');
+            errorEl.textContent = error || '';
+            
+            if (step === 'phone') {
+                title.textContent = '📱 Введите номер телефона';
+                input.placeholder = '+998901234567';
+                input.type = 'text';
+            } else {
+                title.textContent = '🔑 Введите код из Telegram';
+                input.placeholder = '12345';
+                input.type = 'text';
+            }
+            input.value = '';
+        }
+
+        function hideAuthModal() {
+            document.getElementById('authModal').classList.remove('show');
+        }
+
+        async function submitAuth() {
+            const input = document.getElementById('authInput').value.trim();
+            const errorEl = document.getElementById('authError');
+            
+            if (!input) {
+                errorEl.textContent = 'Введите значение';
+                return;
+            }
+            
+            try {
+                const endpoint = authStep === 'phone' ? '/api/auth/phone' : '/api/auth/code';
+                const body = authStep === 'phone' ? { phone: input } : { code: input };
+                
+                const r = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                
+                const d = await r.json();
+                
+                if (d.success) {
+                    if (authStep === 'phone') {
+                        showAuthModal('code', '');
+                    } else {
+                        hideAuthModal();
+                        refreshStatus();
+                    }
+                } else {
+                    errorEl.textContent = d.error || 'Ошибка';
+                }
+            } catch (e) {
+                errorEl.textContent = 'Ошибка соединения';
+            }
+        }
+
+        async function saveQuickConfig() {
             const config = {
-                mistral_key: document.getElementById('mistralKey').value,
-                mistral_model: document.getElementById('mistralModel').value,
+                api_base_url: document.getElementById('quickBaseUrl').value,
+                model: document.getElementById('quickModel').value,
+                api_key: document.getElementById('quickApiKey').value
+            };
+            
+            try {
+                await fetch('/api/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(config)
+                });
+                alert('✅ Сохранено!');
+                loadConfig();
+            } catch (e) {
+                alert('❌ Ошибка');
+            }
+        }
+
+        async function saveCouriers() {
+            const config = {
+                couriers: document.getElementById('couriersInput').value
+            };
+            
+            try {
+                await fetch('/api/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(config)
+                });
+                alert('✅ Курьеры сохранены!');
+            } catch (e) {
+                alert('❌ Ошибка');
+            }
+        }
+
+        async function saveFullConfig() {
+            const config = {
+                api_id: document.getElementById('apiId').value,
+                api_hash: document.getElementById('apiHash').value,
                 api_base_url: document.getElementById('apiBaseUrl').value,
                 api_key: document.getElementById('apiKey').value,
                 model: document.getElementById('modelName').value,
-                api_id: document.getElementById('apiId').value,
-                api_hash: document.getElementById('apiHash').value,
-                system_prompt: document.getElementById('systemPrompt').value
+                mistral_key: document.getElementById('mistralKey').value,
+                mistral_model: document.getElementById('mistralModel').value,
+                system_prompt: document.getElementById('systemPrompt').value,
+                couriers: document.getElementById('couriersInput').value
             };
             
             try {
@@ -1128,99 +1841,20 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                     body: JSON.stringify(config)
                 });
                 alert('✅ Настройки сохранены!');
+                loadConfig();
             } catch (e) {
-                alert('❌ Ошибка сохранения: ' + e.message);
+                alert('❌ Ошибка');
             }
         }
 
-        async function saveQuickConfig() {
-            const config = {
-                api_base_url: document.getElementById('quickBaseUrl').value,
-                api_key: document.getElementById('quickApiKey').value,
-                model: document.getElementById('quickModel').value
-            };
-            
-            try {
-                await fetch('/api/config', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(config)
-                });
-                
-                // Sync with main config fields
-                document.getElementById('apiBaseUrl').value = config.api_base_url;
-                document.getElementById('apiKey').value = config.api_key;
-                document.getElementById('modelName').value = config.model;
-                
-                alert('✅ Быстрые настройки сохранены!');
-                refreshStatus();
-            } catch (e) {
-                alert('❌ Ошибка: ' + e.message);
-            }
-        }
-
-        async function refreshStatus() {
-            try {
-                const r = await fetch('/api/status');
-                const data = await r.json();
-                
-                const badge = document.getElementById('statusBadge');
-                badge.textContent = data.running ? 'Онлайн' : 'Оффлайн';
-                badge.className = 'status-badge ' + (data.running ? 'status-online' : 'status-offline');
-                
-                document.getElementById('statMessages').textContent = data.message_count;
-                document.getElementById('statLeads').textContent = data.lead_count;
-                document.getElementById('statUsername').textContent = data.username || '-';
-                
-                document.getElementById('btnStart').disabled = data.running;
-                document.getElementById('btnStop').disabled = !data.running;
-                
-                // Check auth status
-                const ar = await fetch('/api/auth/status');
-                const auth = await ar.json();
-                authStep = auth.step;
-                
-                if (auth.step === 'phone' || auth.step === 'code') {
-                    showAuthModal();
-                }
-            } catch (e) {
-                console.error('Status error:', e);
-            }
-            
-            // Load model name for stats
-            try {
-                const cr = await fetch('/api/config');
-                const cfg = await cr.json();
-                document.getElementById('statModel').textContent = cfg.model ? cfg.model.substring(0, 12) : '-';
-            } catch (e) {}
-        }
-
-        async function startBot() {
-            try {
-                await fetch('/api/start', { method: 'POST' });
-                setTimeout(refreshStatus, 1000);
-            } catch (e) {
-                alert('Ошибка запуска: ' + e.message);
-            }
-        }
-
-        async function stopBot() {
-            try {
-                await fetch('/api/stop', { method: 'POST' });
-                setTimeout(refreshStatus, 500);
-            } catch (e) {
-                alert('Ошибка остановки: ' + e.message);
-            }
-        }
-
-        async function refreshLogs() {
+        async function loadLogs() {
             try {
                 const r = await fetch('/api/logs');
                 const logs = await r.json();
-                const container = document.getElementById('logsContainer');
                 
+                const container = document.getElementById('logsContainer');
                 if (logs.length === 0) {
-                    container.innerHTML = '<p style="color: #6b7280; text-align: center; padding: 20px;">Нет логов</p>';
+                    container.innerHTML = '<div style="text-align: center; color: #6b7280; padding: 20px;">Нет логов</div>';
                     return;
                 }
                 
@@ -1231,13 +1865,13 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                     else if (log.direction === 'error') dirClass = 'log-error';
                     else if (log.direction === 'success') dirClass = 'log-success';
                     else if (log.direction === 'lead') dirClass = 'log-lead';
-                    
-                    const imageBadge = log.has_image ? '<span class="log-image">📷</span> ' : '';
+                    else if (log.direction === 'order') dirClass = 'log-order';
+                    else if (log.direction === 'courier') dirClass = 'log-courier';
                     
                     return `<div class="log-entry ${dirClass}">
                         <span class="log-time">${log.timestamp}</span>
                         <span class="log-sender">${log.sender}</span>
-                        <span class="log-message">${imageBadge}${escapeHtml(log.message)}</span>
+                        <span class="log-message">${log.message}</span>
                     </div>`;
                 }).join('');
             } catch (e) {
@@ -1246,34 +1880,33 @@ WEB_UI_HTML = '''<!DOCTYPE html>
         }
 
         async function clearLogs() {
-            if (!confirm('Очистить все логи?')) return;
             await fetch('/api/logs', { method: 'DELETE' });
-            refreshLogs();
+            loadLogs();
         }
 
-        async function refreshLeads() {
+        async function loadLeads() {
             try {
                 const r = await fetch('/api/leads');
                 const leads = await r.json();
-                const container = document.getElementById('leadsContainer');
                 
+                const container = document.getElementById('leadsContainer');
                 if (leads.length === 0) {
-                    container.innerHTML = '<p style="color: #6b7280; text-align: center; padding: 20px;">Нет лидов</p>';
+                    container.innerHTML = '<div style="text-align: center; color: #6b7280; padding: 20px;">Нет лидов</div>';
                     return;
                 }
                 
                 container.innerHTML = leads.reverse().map(lead => {
-                    const urgencyClass = 'urgency-' + (lead.urgency || 'medium');
                     return `<div class="lead-card">
                         <div class="lead-header">
-                            <span class="lead-client">${escapeHtml(lead.client_name || 'Неизвестно')}</span>
-                            <span class="lead-type">${lead.lead_type || 'new_client'}</span>
+                            <span class="lead-client">👤 ${lead.client_name}</span>
+                            <span class="lead-type">${lead.lead_type}</span>
                         </div>
-                        <div class="lead-summary">${escapeHtml(lead.summary || '')}</div>
+                        <div class="lead-summary">${lead.summary}</div>
                         <div class="lead-meta">
-                            <span class="${urgencyClass}">⚡ ${lead.urgency || 'medium'}</span>
-                            <span>📊 ${(lead.confidence || 0) * 100}%</span>
-                            <span>🕐 ${lead.timestamp || ''}</span>
+                            <span class="urgency-${lead.urgency}">⚡ ${lead.urgency}</span>
+                            <span>📊 ${Math.round(lead.confidence * 100)}%</span>
+                            <span>🕐 ${lead.timestamp}</span>
+                            <span>📱 ${lead.chat_id}</span>
                         </div>
                     </div>`;
                 }).join('');
@@ -1283,97 +1916,91 @@ WEB_UI_HTML = '''<!DOCTYPE html>
         }
 
         async function clearLeads() {
-            if (!confirm('Очистить все лиды?')) return;
             await fetch('/api/leads', { method: 'DELETE' });
-            refreshLeads();
+            loadLeads();
         }
 
-        function showAuthModal() {
-            const modal = document.getElementById('authModal');
-            const title = document.getElementById('authTitle');
-            const input = document.getElementById('authInput');
-            const error = document.getElementById('authError');
-            
-            modal.classList.add('show');
-            error.textContent = '';
-            
-            if (authStep === 'phone') {
-                title.textContent = '📱 Введите номер телефона';
-                input.placeholder = '+998901234567';
-                input.type = 'tel';
-            } else if (authStep === 'code') {
-                title.textContent = '🔑 Введите код из Telegram';
-                input.placeholder = '12345';
-                input.type = 'text';
-            }
-            input.value = '';
-            input.focus();
-        }
-
-        async function submitAuth() {
-            const input = document.getElementById('authInput');
-            const error = document.getElementById('authError');
-            const value = input.value.trim();
-            
-            if (!value) {
-                error.textContent = 'Введите значение';
-                return;
-            }
-            
+        async function loadOrders() {
             try {
-                if (authStep === 'phone') {
-                    const r = await fetch('/api/auth/phone', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ phone: value })
-                    });
-                    const data = await r.json();
-                    
-                    if (data.success) {
-                        authStep = 'code';
-                        showAuthModal();
-                    } else {
-                        error.textContent = data.error || 'Ошибка';
-                    }
-                } else if (authStep === 'code') {
-                    const r = await fetch('/api/auth/code', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ code: value })
-                    });
-                    const data = await r.json();
-                    
-                    if (data.success) {
-                        document.getElementById('authModal').classList.remove('show');
-                        authStep = 'done';
-                        refreshStatus();
-                    } else {
-                        error.textContent = data.error || 'Неверный код';
-                    }
+                const r = await fetch('/api/orders');
+                const orders = await r.json();
+                
+                const container = document.getElementById('ordersContainer');
+                const orderList = Object.entries(orders);
+                
+                if (orderList.length === 0) {
+                    container.innerHTML = '<div style="text-align: center; color: #6b7280; padding: 20px;">Нет активных заказов</div>';
+                    return;
                 }
+                
+                container.innerHTML = orderList.map(([chatId, order]) => {
+                    const statusClass = order.payment_confirmed ? 'paid' : 'pending';
+                    const statusText = order.payment_confirmed ? '✅ Оплачен' : '⏳ Ожидает';
+                    
+                    return `<div class="order-card">
+                        <div class="order-header">
+                            <span class="order-client">👤 ${order.client_name}</span>
+                            <span class="order-status ${statusClass}">${statusText}</span>
+                        </div>
+                        <div class="order-details">
+                            <div class="order-detail"><span>📱</span> <span>${order.phone || '-'}</span></div>
+                            <div class="order-detail"><span>🔥</span> <span>${order.calories || '-'}</span></div>
+                            <div class="order-detail"><span>📅</span> <span>${order.days || '-'} дней</span></div>
+                            <div class="order-detail"><span>🚚</span> <span>${order.delivery_date || '-'}</span></div>
+                            <div class="order-detail"><span>📍</span> <span>${(order.address || '-').substring(0, 30)}</span></div>
+                            <div class="order-detail"><span>💰</span> <span>${order.total_price ? order.total_price.toLocaleString() + ' сум' : '-'}</span></div>
+                        </div>
+                        ${!order.payment_confirmed ? `<button class="btn btn-primary" style="margin-top:10px;padding:8px 16px;font-size:12px;" onclick="confirmOrder(${chatId})">✅ Подтвердить оплату</button>` : ''}
+                    </div>`;
+                }).join('');
             } catch (e) {
-                error.textContent = 'Ошибка: ' + e.message;
+                console.error('Orders error:', e);
             }
         }
 
-        // Handle Enter key in auth modal
+        async function refreshOrders() {
+            loadOrders();
+        }
+
+        async function confirmOrder(chatId) {
+            try {
+                await fetch(`/api/orders/${chatId}/confirm`, { method: 'POST' });
+                loadOrders();
+                alert('✅ Оплата подтверждена! Заказ отправлен в Saved Messages');
+            } catch (e) {
+                alert('❌ Ошибка');
+            }
+        }
+
+        function showPanel(name) {
+            document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.getElementById('panel-' + name).classList.add('active');
+            event.target.classList.add('active');
+            
+            if (name === 'logs') loadLogs();
+            if (name === 'leads') loadLeads();
+            if (name === 'orders') loadOrders();
+        }
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            loadConfig();
+            refreshStatus();
+            refreshInterval = setInterval(refreshStatus, 5000);
+        });
+
+        // Handle Enter in auth modal
         document.getElementById('authInput').addEventListener('keypress', (e) => {
             if (e.key === 'Enter') submitAuth();
         });
-
-        function escapeHtml(text) {
-            if (!text) return '';
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-        }
     </script>
 </body>
 </html>
 '''
 
 @app.get("/", response_class=HTMLResponse)
-async def root():
+async def get_web_ui():
     return WEB_UI_HTML
 
 # ---------------------------------------------------------------------------
