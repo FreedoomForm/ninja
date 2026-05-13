@@ -26,7 +26,7 @@ from pydantic import BaseModel
 import httpx
 from telethon import TelegramClient, events
 from telethon.tl.types import User, MessageMediaGeo, MessageMediaGeoLive, MessageMediaPhoto, DocumentAttributeSticker
-from telethon.tl.types import MessageMediaDocument
+from telethon.tl.types import MessageMediaDocument, InputMediaGeo, InputGeoPoint
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -226,6 +226,8 @@ class ClientOrder:
     phone: str = ""
     address: str = ""
     location_url: str = ""
+    location_lat: float = 0.0  # Широта для нативной геолокации
+    location_lon: float = 0.0  # Долгота для нативной геолокации
     calories: str = ""
     package_type: str = "classic"  # classic, individual, diabetic
     days: int = 0
@@ -234,6 +236,7 @@ class ClientOrder:
     total_price: int = 0
     payment_confirmed: bool = False
     check_image_path: str = ""
+    check_image_file: str = ""  # Путь к файлу чека для отправки
     notes: str = ""
     created_at: str = ""
     updated_at: str = ""
@@ -757,24 +760,50 @@ async def handle_courier_message(chat_id: int, sender: User, message):
 # ---------------------------------------------------------------------------
 # Telegram Bot Logic
 # ---------------------------------------------------------------------------
-async def send_order_to_saved_messages(order: ClientOrder, check_image_data: str = None):
-    """Send complete order info to Saved Messages"""
+async def send_order_to_saved_messages(order: ClientOrder, check_image_path: str = None):
+    """Send complete order info to Saved Messages with native location"""
     global client
     try:
         me = await client.get_me()
         
+        # Send check image first if available
+        if check_image_path and Path(check_image_path).exists():
+            try:
+                await client.send_file(me.id, check_image_path, caption="💳 Чек об оплате")
+                add_log("Чек отправлен в Saved Messages", "System", "order")
+            except Exception as e:
+                add_log(f"Ошибка отправки чека: {e}", "System", "error")
+        
+        # Send native location if coordinates available
+        if order.location_lat != 0.0 and order.location_lon != 0.0:
+            try:
+                geo_point = InputGeoPoint(lat=order.location_lat, long=order.location_lon)
+                geo_media = InputMediaGeo(geo_point=geo_point)
+                await client.send_message(me.id, file=geo_media)
+                add_log(f"Локация отправлена: {order.location_lat}, {order.location_lon}", "System", "order")
+            except Exception as e:
+                add_log(f"Ошибка отправки локации: {e}", "System", "error")
+        
         # Build order message
+        location_info = ""
+        if order.location_lat != 0.0 and order.location_lon != 0.0:
+            location_info = f"🗺 Локация: {order.location_lat:.6f}, {order.location_lon:.6f}"
+        elif order.location_url:
+            location_info = f"🗺 Ссылка: {order.location_url}"
+        else:
+            location_info = "🗺 Локация: не указана"
+        
         message = f"""✅ ЗАКАЗ ОФОРМЛЕН
 
 👤 Клиент: {order.client_name}
 📱 Телефон: {order.phone or 'не указан'}
 📍 Адрес: {order.address or 'не указан'}
-🗺 Локация: {order.location_url or 'не указана'}
+{location_info}
 
 📦 Пакет: {order.package_type}
-🔥 Калории: {order.calories}
-📅 Дней: {order.days}
-🚚 Доставка: {order.delivery_date}
+🔥 Калории: {order.calories or 'не указаны'}
+📅 Дней: {order.days or 'не указано'}
+🚚 Доставка: {order.delivery_date or 'не указана'}
 
 💰 Цена за день: {order.price_per_day:,} сум
 💰 Итого: {order.total_price:,} сум
@@ -788,18 +817,6 @@ async def send_order_to_saved_messages(order: ClientOrder, check_image_data: str
         
         # Send text message
         await client.send_message(me.id, message)
-        
-        # Send location if available
-        if order.location_url:
-            # Extract coordinates from URL
-            match = re.search(r'q=([0-9.]+),([0-9.]+)', order.location_url)
-            if match:
-                lat, lon = float(match.group(1)), float(match.group(2))
-                await client.send_message(me.id, f"🗺 Локация клиента: {order.location_url}")
-        
-        # Send check image if available
-        if check_image_data:
-            await client.send_message(me.id, "[Чек об оплате прикреплён выше]")
         
         add_log(f"Заказ сохранён: {order.client_name}", "System", "order")
     except Exception as e:
@@ -895,6 +912,8 @@ async def handle_message(chat_id: int, sender: User, message):
     # Update order details from message
     if context.has_location:
         order.location_url = f"https://maps.google.com/maps?q={context.location_lat},{context.location_lon}"
+        order.location_lat = context.location_lat
+        order.location_lon = context.location_lon
     
     # Parse delivery date from message
     delivery_date = parse_delivery_date(text)
@@ -1346,8 +1365,8 @@ async def confirm_order_payment(chat_id: int):
         orders[chat_id].updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         save_orders()
         
-        # Send to saved messages
-        await send_order_to_saved_messages(orders[chat_id])
+        # Send to saved messages with check image
+        await send_order_to_saved_messages(orders[chat_id], orders[chat_id].check_image_path)
         return {"success": True}
     return {"error": "Order not found"}
 
