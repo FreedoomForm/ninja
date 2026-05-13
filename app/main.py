@@ -340,14 +340,44 @@ def save_leads() -> None:
         json.dump(leads_log[-200:], f, indent=2, ensure_ascii=False)
 
 def load_orders() -> Dict[int, ClientOrder]:
+    result = {}
     if ORDERS_FILE.exists():
         try:
             with open(ORDERS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                return {int(k): ClientOrder(**v) for k, v in data.items()}
-        except:
-            pass
-    return {}
+                for k, v in data.items():
+                    try:
+                        # Ensure all fields exist with defaults
+                        order_data = {
+                            "chat_id": int(k),
+                            "client_name": v.get("client_name", "Unknown"),
+                            "phone": v.get("phone", ""),
+                            "address": v.get("address", ""),
+                            "location_url": v.get("location_url", ""),
+                            "location_lat": v.get("location_lat", 0.0),
+                            "location_lon": v.get("location_lon", 0.0),
+                            "calories": v.get("calories", ""),
+                            "package_type": v.get("package_type", "classic"),
+                            "days": v.get("days", 0),
+                            "delivery_date": v.get("delivery_date", ""),
+                            "price_per_day": v.get("price_per_day", 0),
+                            "total_price": v.get("total_price", 0),
+                            "payment_confirmed": v.get("payment_confirmed", False),
+                            "check_image_path": v.get("check_image_path", ""),
+                            "check_image_file": v.get("check_image_file", ""),
+                            "notes": v.get("notes", ""),
+                            "created_at": v.get("created_at", ""),
+                            "updated_at": v.get("updated_at", ""),
+                            "courier_id": v.get("courier_id", 0),
+                            "delivery_status": v.get("delivery_status", "pending"),
+                        }
+                        result[int(k)] = ClientOrder(**order_data)
+                    except Exception as e:
+                        print(f"Error loading order {k}: {e}")
+                        continue
+        except Exception as e:
+            print(f"Error loading orders file: {e}")
+    return result
 
 def save_orders() -> None:
     with open(ORDERS_FILE, "w", encoding="utf-8") as f:
@@ -1363,10 +1393,19 @@ class CodeModel(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global message_logs, leads_log, orders, config
+    print("[STARTUP] Loading logs...")
     message_logs = load_logs()
+    print(f"[STARTUP] Loaded {len(message_logs)} log entries")
+    print("[STARTUP] Loading leads...")
     leads_log = load_leads()
+    print(f"[STARTUP] Loaded {len(leads_log)} leads")
+    print("[STARTUP] Loading orders...")
     orders = load_orders()
+    print(f"[STARTUP] Loaded {len(orders)} orders")
+    print("[STARTUP] Loading config...")
     config = load_config()
+    print("[STARTUP] Config loaded")
+    print("[STARTUP] Application ready!")
     yield
 
 app = FastAPI(title="Ninja Userbot API", lifespan=lifespan)
