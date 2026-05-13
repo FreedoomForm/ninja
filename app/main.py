@@ -26,7 +26,7 @@ from pydantic import BaseModel
 import httpx
 from telethon import TelegramClient, events
 from telethon.tl.types import User, MessageMediaGeo, MessageMediaGeoLive, MessageMediaPhoto, DocumentAttributeSticker
-from telethon.tl.types import MessageMediaDocument, InputMediaGeo, InputGeoPoint, Document
+from telethon.tl.types import MessageMediaDocument, Document
 from telethon.utils import get_extension
 
 # ---------------------------------------------------------------------------
@@ -965,12 +965,17 @@ async def send_order_to_saved_messages(order: ClientOrder, check_image_path: str
         # Send native location if coordinates available
         if order.location_lat != 0.0 and order.location_lon != 0.0:
             try:
-                geo_point = InputGeoPoint(lat=order.location_lat, long=order.location_lon)
-                geo_media = InputMediaGeo(geo_point=geo_point)
+                # Try to send native location using Telethon's types
+                from telethon.tl import types as tl_types
+                geo_point = tl_types.InputGeoPoint(lat=order.location_lat, long=order.location_lon)
+                geo_media = tl_types.InputMediaGeo(geo_point=geo_point)
                 await client.send_message(me.id, file=geo_media)
                 add_log(f"Локация отправлена: {order.location_lat}, {order.location_lon}", "System", "order")
             except Exception as e:
-                add_log(f"Ошибка отправки локации: {e}", "System", "error")
+                # Fallback: send as Google Maps link
+                add_log(f"Native location failed: {e}, sending as link", "System", "system")
+                maps_url = f"https://maps.google.com/maps?q={order.location_lat},{order.location_lon}"
+                await client.send_message(me.id, f"🗺 Локация клиента: {maps_url}")
         
         # Build order message
         location_info = ""
