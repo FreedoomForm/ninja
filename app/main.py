@@ -26,7 +26,8 @@ from pydantic import BaseModel
 import httpx
 from telethon import TelegramClient, events
 from telethon.tl.types import User, MessageMediaGeo, MessageMediaGeoLive, MessageMediaPhoto, DocumentAttributeSticker
-from telethon.tl.types import MessageMediaDocument, InputMediaGeo, InputGeoPoint
+from telethon.tl.types import MessageMediaDocument, InputMediaGeo, InputGeoPoint, Document
+from telethon.utils import get_extension
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -175,7 +176,13 @@ DEFAULT_SYSTEM_PROMPT = """Ты Бахром, 35-летний сотрудник
 4. Напомни про оплату до 21:00
 
 ПОВЕДЕНИЕ ПРИ СТИКЕРАХ:
-Когда клиент присылает стикер - ответь эмодзи или коротким сообщением, как бы ответил реальный человек.
+Когда клиент присылает стикер:
+- AI видит описание стикера (какой персонаж, какое настроение)
+- Ответь также как ответил бы реальный человек - стикером (если умеешь), эмодзи или коротким сообщением
+- Если стикер выражает благодарность - ответь "Пожалуйста!" или "Рад помочь! 😊"
+- Если стикер смешной - можно ответить "хаха" или подходящим эмодзи
+- Если стикер выражает согласие - подтверди заказ или переходи к следующему шагу
+- Не пиши длинные сообщения в ответ на стикер
 """
 
 DEFAULT_LEAD_PROMPT = """Ты анализируешь переписку с клиентом и определяешь, является ли это успешным лидом.
@@ -240,6 +247,8 @@ class ClientOrder:
     notes: str = ""
     created_at: str = ""
     updated_at: str = ""
+    courier_id: int = 0  # ID курьера который везёт заказ
+    delivery_status: str = "pending"  # pending, on_the_way, delivered, failed
     
     def to_dict(self):
         return asdict(self)
@@ -262,6 +271,7 @@ conversation_history: dict[int, list[dict]] = {}
 message_logs: list = []
 leads_log: list = []
 orders: Dict[int, ClientOrder] = {}  # chat_id -> ClientOrder
+courier_deliveries: Dict[int, int] = {}  # courier_chat_id -> client_chat_id (текущая доставка)
 
 # Bot instance and state
 client: Optional[TelegramClient] = None
@@ -519,7 +529,7 @@ async def download_and_encode_image(msg) -> Optional[str]:
         print(f"Error downloading image: {e}")
         return None
 
-async def save_image_for_order(msg, chat_id: int) -> Optional[str]:
+async def save_image_for_order(msg, chat_id: int, prefix: str = "check") -> Optional[str]:
     """Save image and return file path"""
     global client
     try:
@@ -529,12 +539,69 @@ async def save_image_for_order(msg, chat_id: int) -> Optional[str]:
             photo = msg.media.photo
             if photo:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                file_path = IMAGES_DIR / f"check_{chat_id}_{timestamp}.jpg"
+                file_path = IMAGES_DIR / f"{prefix}_{chat_id}_{timestamp}.jpg"
                 await client.download_media(photo, file_path)
                 return str(file_path)
         return None
     except Exception as e:
         print(f"Error saving image: {e}")
+        return None
+
+async def download_sticker_as_image(msg) -> Optional[str]:
+    """Download sticker and convert to base64 for Vision API"""
+    global client
+    try:
+        if not msg.media or not hasattr(msg.media, 'document'):
+            return None
+        
+        doc = msg.media.document
+        if not doc:
+            return None
+        
+        # Check if it's a sticker
+        is_sticker = False
+        sticker_emoji = ""
+        for attr in doc.attributes:
+            if isinstance(attr, DocumentAttributeSticker):
+                is_sticker = True
+                sticker_emoji = attr.alt or ""
+                break
+        
+        if not is_sticker:
+            return None
+        
+        # Download sticker (usually webp format)
+        file_path = await client.download_media(doc, IMAGES_DIR)
+        
+        # Read and encode
+        with open(file_path, "rb") as f:
+            image_data = f.read()
+        
+        # Convert to base64
+        base64_data = base64.b64encode(image_data).decode('utf-8')
+        
+        # Detect mime type
+        ext = Path(file_path).suffix.lower()
+        mime_types = {
+            '.webp': 'image/webp',
+            '.png': 'image/png', 
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.gif': 'image/gif'
+        }
+        mime_type = mime_types.get(ext, 'image/webp')
+        
+        data_url = f"data:{mime_type};base64,{base64_data}"
+        
+        # Cleanup
+        try:
+            os.remove(file_path)
+        except:
+            pass
+        
+        return data_url
+    except Exception as e:
+        print(f"Error downloading sticker: {e}")
         return None
 
 # ---------------------------------------------------------------------------
@@ -550,18 +617,25 @@ async def describe_image_with_pixtral(image_url: str, mistral_key: str, model: s
             "role": "user",
             "content": [
                 {"type": "text", "text": """Проанализируй это изображение. Это может быть:
-1. Чек об оплате (перевод денег)
-2. Скриншот приложения банка
-3. Фото продукта
-4. Другое
 
-Если это чек/перевод, укажи:
+1. Стикер из Telegram (мультяшное изображение, эмодзи-персонаж)
+2. Чек об оплате (перевод денег)
+3. Скриншот приложения банка
+4. Фото продукта или еды
+5. Другое
+
+ЕСЛИ ЭТО СТИКЕР:
+- Опиши какой эмоционал/настроение передаёт стикер
+- Опиши персонажа если есть (кот, медведь, человек и т.д.)
+- Какую реакцию ожидают от этого стикера (согласие, смех, грусть, благодарность)
+
+ЕСЛИ ЭТО ЧЕК/ПЕРЕВОД:
 - Сумму перевода
 - Дату и время если видны
 - Номер карты получателя если виден
 - Имя получателя если видно
 
-Отвечай на русском языке кратко и по делу."""},
+Отвечай на русском языке кратко и по делу (2-3 предложения)."""},
                 {"type": "image_url", "image_url": {"url": image_url}}
             ]
         }
@@ -731,29 +805,126 @@ def is_courier(sender: User, cfg: dict) -> bool:
     return any(c in sender_username or c in sender_name for c in courier_list)
 
 async def handle_courier_message(chat_id: int, sender: User, message):
-    """Handle messages from couriers differently"""
-    global client, config
+    """Handle messages from couriers with smart delivery tracking"""
+    global client, config, courier_deliveries, orders
     
     sender_name = sender.first_name or sender.last_name or str(sender.id)
     text = (message.text or "").strip()
     
-    add_log(f"[КУРЬЕР] {text}", sender_name, "courier")
+    # Check for photo from courier (delivery proof)
+    has_photo = False
+    photo_path = None
+    if message.media and isinstance(message.media, MessageMediaPhoto):
+        has_photo = True
+        photo_path = await save_image_for_order(message, chat_id, prefix="delivery")
+        add_log(f"[КУРЬЕР] 📷 Фото доставки", sender_name, "courier")
+    else:
+        add_log(f"[КУРЬЕР] {text}", sender_name, "courier")
     
-    # Simple acknowledgment for couriers
     try:
-        # Check for delivery confirmation patterns
-        if any(word in text.lower() for word in ['доставил', 'отдал', ' delivered', 'етказдим']):
+        me = await client.get_me()
+        
+        # Determine client for this courier
+        client_chat_id = courier_deliveries.get(chat_id, 0)
+        
+        # Try to find client from text (name, address hints)
+        if not client_chat_id and text:
+            text_lower = text.lower()
+            for order_chat_id, order in orders.items():
+                if order.delivery_status in ["pending", "on_the_way"]:
+                    # Check if order address or name mentioned in text
+                    if order.client_name and order.client_name.lower() in text_lower:
+                        client_chat_id = order_chat_id
+                        break
+                    if order.address and order.address.lower() in text_lower:
+                        client_chat_id = order_chat_id
+                        break
+        
+        # Handle delivery confirmation
+        delivery_keywords = ['доставил', 'отдал', 'delivered', 'етказдим', 'бердим', 'отпра']
+        problem_keywords = ['не нашел', 'не открыл', 'не ответил', 'no answer', 'уйди', 'ушёл', 'нет дома', 'телефон выключен']
+        
+        is_delivery_confirmed = any(word in text.lower() for word in delivery_keywords)
+        is_problem = any(word in text.lower() for word in problem_keywords)
+        
+        if is_delivery_confirmed or has_photo:
+            # Delivery successful
             await client.send_message(chat_id, "Хоп, отмечаем! Рахмат 👍")
-            # Also send to saved messages
-            me = await client.get_me()
-            await client.send_message(me.id, f"📦 КУРЬЕР ДОСТАВИЛ\n\n👤 {sender_name}\n📱 @{sender.username or 'нет username'}\n🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n💬 {text}")
-        elif any(word in text.lower() for word in ['не нашел', 'не открыл', 'не ответил', 'no answer']):
-            await client.send_message(chat_id, "Понял, щас позвоню клиенту")
+            
+            # Send to saved messages
+            await client.send_message(me.id, f"📦 КУРЬЕР ДОСТАВИЛ\n\n👤 Курьер: {sender_name}\n📱 @{sender.username or 'нет username'}\n🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n💬 {text}")
+            
+            # Send photo to saved messages
+            if photo_path and Path(photo_path).exists():
+                await client.send_file(me.id, photo_path, caption=f"📷 Фото доставки от {sender_name}")
+            
+            # Send photo to client if we know who it is
+            if client_chat_id and photo_path and Path(photo_path).exists():
+                try:
+                    # Get client name
+                    client_order = orders.get(client_chat_id)
+                    client_name = client_order.client_name if client_order else "клиент"
+                    
+                    await client.send_file(client_chat_id, photo_path, caption=f"✅ Ваш заказ доставлен!\n\nПриятного аппетита! 🍽️")
+                    add_log(f"Фото доставки отправлено клиенту {client_name}", "System", "courier")
+                    
+                    # Update order status
+                    if client_order:
+                        client_order.delivery_status = "delivered"
+                        save_orders()
+                        
+                except Exception as e:
+                    add_log(f"Не удалось отправить фото клиенту: {e}", "System", "error")
+                    # Ask courier for client
+                    await client.send_message(chat_id, "Не получилось отправить фото клиенту. Напишите имя или адрес клиента?")
+            
+            elif has_photo and not client_chat_id:
+                # Ask courier who the delivery is for
+                await client.send_message(chat_id, "Кому доставили? Напишите имя клиента или адрес")
+                
+        elif is_problem:
+            # Problem with delivery
+            await client.send_message(chat_id, "Понял, щас попробую связаться с клиентом")
+            
             # Notify in saved messages
-            me = await client.get_me()
-            await client.send_message(me.id, f"⚠️ ПРОБЛЕМА С ДОСТАВКОЙ\n\n👤 {sender_name}\n💬 {text}\n🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}")
-        else:
-            await client.send_message(chat_id, "Принял, спасибо")
+            await client.send_message(me.id, f"⚠️ ПРОБЛЕМА С ДОСТАВКОЙ\n\n👤 Курьер: {sender_name}\n💬 {text}\n🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}")
+            
+            # Try to call client if we know who it is
+            if client_chat_id:
+                client_order = orders.get(client_chat_id)
+                if client_order and client_order.phone:
+                    await client.send_message(chat_id, f"Телефон клиента: {client_order.phone}")
+                    
+                    # Also message the client
+                    try:
+                        await client.send_message(client_chat_id, f"Здравствуйте! Курьер пытался доставить ваш заказ, но не смог дозвониться. Пожалуйста, ответьте на звонок или напишите когда будете дома.")
+                    except:
+                        pass
+            
+            # Update order status
+            if client_chat_id and client_chat_id in orders:
+                orders[client_chat_id].delivery_status = "failed"
+                save_orders()
+                
+        elif text:
+            # Use AI to understand courier message
+            try:
+                # Check if asking about client availability
+                if any(word in text.lower() for word in ['уйехал', 'ушёл', 'дома', 'ждать', 'сколько']):
+                    if client_chat_id:
+                        # Message the client
+                        try:
+                            await client.send_message(client_chat_id, "Курьер на месте! Пожалуйста, ответьте на звонок или выйдите забрать заказ.")
+                            await client.send_message(chat_id, "Написал клиенту, ждите ответа")
+                        except Exception as e:
+                            await client.send_message(chat_id, "Не могу написать клиенту, попробуйте позвонить")
+                    else:
+                        await client.send_message(chat_id, "Напишите имя клиента или адрес, попробую найти")
+                else:
+                    await client.send_message(chat_id, "Принял, спасибо")
+            except Exception as e:
+                await client.send_message(chat_id, "Принял")
+                
     except Exception as e:
         add_log(f"Ошибка ответа курьеру: {e}", "System", "error")
 
@@ -889,7 +1060,15 @@ async def handle_message(chat_id: int, sender: User, message):
                     if isinstance(attr, DocumentAttributeSticker):
                         context.has_sticker = True
                         context.sticker_emoji = attr.alt or "👍"
-                        add_log(f"Стикер: {context.sticker_emoji}", sender_name, "incoming")
+                        
+                        # Try to download sticker for Vision API
+                        sticker_url = await download_sticker_as_image(message)
+                        if sticker_url:
+                            context.has_image = True  # Treat as image for AI
+                            context.image_url = sticker_url
+                            add_log(f"Стикер: {context.sticker_emoji} (отправлен в Vision API)", sender_name, "incoming")
+                        else:
+                            add_log(f"Стикер: {context.sticker_emoji}", sender_name, "incoming")
                         break
     
     if not text and not context.has_image and not context.has_location and not context.has_sticker:
@@ -1369,6 +1548,24 @@ async def confirm_order_payment(chat_id: int):
         await send_order_to_saved_messages(orders[chat_id], orders[chat_id].check_image_path)
         return {"success": True}
     return {"error": "Order not found"}
+
+@app.post("/api/orders/{chat_id}/assign_courier/{courier_id}")
+async def assign_courier_to_order(chat_id: int, courier_id: int):
+    """Assign a courier to deliver an order"""
+    global courier_deliveries
+    if chat_id in orders:
+        orders[chat_id].courier_id = courier_id
+        orders[chat_id].delivery_status = "on_the_way"
+        orders[chat_id].updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        courier_deliveries[courier_id] = chat_id  # Track current delivery
+        save_orders()
+        return {"success": True, "message": f"Курьер {courier_id} назначен на заказ {chat_id}"}
+    return {"error": "Order not found"}
+
+@app.get("/api/couriers/deliveries")
+async def get_courier_deliveries():
+    """Get current courier deliveries"""
+    return {str(k): v for k, v in courier_deliveries.items()}
 
 # ---------------------------------------------------------------------------
 # Web UI (embedded)
