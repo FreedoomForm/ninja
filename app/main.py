@@ -688,7 +688,9 @@ async def call_openai_compatible(messages: list[dict], base_url: str, api_key: s
         return r.json()["choices"][0]["message"]["content"].strip()
 
 async def call_ai(messages: list[dict], cfg: dict) -> str:
-    """Main AI function - handles images with Pixtral, text with OpenAI-compatible API"""
+    """Main AI function - text generation with OpenAI-compatible API
+    Images are already processed and descriptions are in message history
+    """
     base_url = cfg.get("api_base_url", "")
     api_key = cfg.get("api_key", "")
     model = cfg.get("model", "")
@@ -711,46 +713,7 @@ async def call_ai(messages: list[dict], cfg: dict) -> str:
             "content": messages_with_time[0]["content"] + time_context
         }
     
-    # Check if there are images in messages
-    has_image = False
-    image_url = None
-    for msg in messages_with_time:
-        content = msg.get("content", "")
-        if isinstance(content, list):
-            for item in content:
-                if item.get("type") == "image_url":
-                    has_image = True
-                    image_url = item.get("image_url", {}).get("url", "")
-                    break
-        if has_image:
-            break
-    
-    # If image exists, describe it with Pixtral first
-    if has_image and image_url:
-        mistral_key = cfg.get("mistral_key", "")
-        mistral_model = cfg.get("mistral_model", "pixtral-12b-2409")
-        
-        if not mistral_key:
-            raise Exception("Для обработки изображений нужен Mistral API ключ (Pixtral)")
-        
-        # Describe image with Pixtral
-        image_description = await describe_image_with_pixtral(image_url, mistral_key, mistral_model)
-        
-        # Replace image with description in messages
-        for msg in messages_with_time:
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                new_content = []
-                for item in content:
-                    if item.get("type") == "text":
-                        new_content.append(item)
-                    elif item.get("type") == "image_url":
-                        new_content.append({
-                            "type": "text",
-                            "text": f"\n[ИЗОБРАЖЕНИЕ: {image_description}]\n"
-                        })
-                msg["content"] = new_content
-    
+    # All content is now text-based (images are already described in history)
     # Call the OpenAI-compatible API
     return await call_openai_compatible(messages_with_time, base_url, api_key, model)
 
@@ -769,26 +732,80 @@ async def analyze_lead(conversation: list[dict], cfg: dict) -> dict:
         print(f"Lead analysis error: {e}")
         return {"is_lead": False}
 
-def add_to_history(chat_id: int, role: str, content: Union[str, list], context: MessageContext = None) -> None:
+def add_to_history(chat_id: int, role: str, content: Union[str, list], context: MessageContext = None, media_description: str = "") -> None:
+    """
+    Add message to conversation history with full context
+    History entry format:
+    {
+        "role": "user"/"assistant",
+        "content": "text or list for images",
+        "media_type": "text/image/sticker/location",
+        "media_description": "description from Vision API or location info"
+    }
+    """
     if chat_id not in conversation_history:
         conversation_history[chat_id] = []
     
-    # Add context info to content
-    if context:
-        if isinstance(content, str):
-            if context.has_location:
-                content = f"[ЛОКАЦИЯ: {context.location_lat}, {context.location_lon}]\n{content}"
-            if context.has_sticker:
-                content = f"[СТИКЕР: {context.sticker_emoji}]\n{content}"
+    # Determine media type and build enriched content
+    media_type = "text"
+    enriched_content = content
     
-    conversation_history[chat_id].append({"role": role, "content": content})
+    if context:
+        if context.has_location:
+            media_type = "location"
+            location_url = f"https://maps.google.com/maps?q={context.location_lat},{context.location_lon}"
+            if isinstance(content, str):
+                enriched_content = f"[ЛОКАЦИЯ: координаты {context.location_lat:.4f}, {context.location_lon:.4f}]\n{location_url}\n{content}"
+            else:
+                enriched_content = f"[ЛОКАЦИЯ: координаты {context.location_lat:.4f}, {context.location_lon:.4f}]\n{location_url}"
+        
+        elif context.has_sticker and not context.has_image:
+            # Sticker without Vision API processing
+            media_type = "sticker"
+            if isinstance(content, str):
+                enriched_content = f"[СТИКЕР: {context.sticker_emoji}]\n{content}"
+            else:
+                enriched_content = f"[СТИКЕР: {context.sticker_emoji}]"
+        
+        elif context.has_image:
+            # Image/sticker was processed by Vision API
+            if context.has_sticker:
+                media_type = "sticker"
+            else:
+                media_type = "image"
+            
+            if media_description:
+                # Store description in history instead of base64 image
+                if isinstance(content, str):
+                    enriched_content = f"[{media_type.upper()}: {media_description}]\n{content}"
+                else:
+                    enriched_content = f"[{media_type.upper()}: {media_description}]"
+    
+    # Create history entry
+    entry = {
+        "role": role,
+        "content": enriched_content,
+        "media_type": media_type,
+        "media_description": media_description
+    }
+    
+    conversation_history[chat_id].append(entry)
     if len(conversation_history[chat_id]) > HISTORY_LIMIT:
         conversation_history[chat_id] = conversation_history[chat_id][-HISTORY_LIMIT:]
 
 def get_conversation_messages(chat_id: int, system_prompt: str) -> list[dict]:
+    """Build messages for AI including all context from last 20 messages"""
     messages = [{"role": "system", "content": system_prompt}]
+    
     if chat_id in conversation_history:
-        messages.extend(conversation_history[chat_id])
+        for entry in conversation_history[chat_id]:
+            # Build message with all context
+            msg = {
+                "role": entry["role"],
+                "content": entry["content"]
+            }
+            messages.append(msg)
+    
     return messages
 
 # ---------------------------------------------------------------------------
@@ -1136,17 +1153,26 @@ async def handle_message(chat_id: int, sender: User, message):
     
     save_orders()
     
-    # Build message for AI
-    if context.has_image:
-        content = []
-        if text:
-            content.append({"type": "text", "text": text})
-        content.append({"type": "image_url", "image_url": {"url": context.image_url}})
-        add_to_history(chat_id, "user", content, context)
-    elif context.has_sticker:
-        add_to_history(chat_id, "user", f"[СТИКЕР: {context.sticker_emoji}] {text}", context)
-    else:
-        add_to_history(chat_id, "user", text, context)
+    # Process image with Vision API BEFORE adding to history
+    media_description = ""
+    if context.has_image and context.image_url:
+        mistral_key = config.get("mistral_key", "")
+        mistral_model = config.get("mistral_model", "pixtral-12b-2409")
+        
+        if mistral_key:
+            try:
+                async with client.action(chat_id, "typing"):
+                    add_log("Обрабатываю изображение...", "System", "system")
+                    media_description = await describe_image_with_pixtral(
+                        context.image_url, mistral_key, mistral_model
+                    )
+                    add_log(f"Vision API: {media_description[:100]}...", "System", "system")
+            except Exception as e:
+                add_log(f"Vision API Error: {e}", "System", "error")
+                media_description = "изображение"
+    
+    # Add message to history with full context
+    add_to_history(chat_id, "user", text, context, media_description)
     
     try:
         async with client.action(chat_id, "typing"):
