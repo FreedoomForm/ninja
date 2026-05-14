@@ -16,8 +16,7 @@ import subprocess
 import time
 import socket
 import base64
-import re
-import queue
+import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, List
@@ -51,7 +50,7 @@ import httpx
 # CONFIGURATION
 # ===========================================================================
 APP_NAME = "Ninja Userbot"
-VERSION = "4.0"
+VERSION = "4.1"
 
 # Data directory
 if sys.platform == 'win32':
@@ -63,21 +62,17 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 SESSION_PATH = DATA_DIR / "ninja"
 CONFIG_FILE = DATA_DIR / "config.json"
 LOGS_FILE = DATA_DIR / "logs.json"
-LEADS_FILE = DATA_DIR / "leads.json"
-ORDERS_FILE = DATA_DIR / "orders.json"
 IMAGES_DIR = DATA_DIR / "images"
 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
-# AI Proxy settings
 AI_PROXY_PORT = 3000
 
 # ===========================================================================
 # COMPANY INFO
 # ===========================================================================
 COMPANY_INFO = """
-КОМПАНИЯ: Sog'lom taom (Соғлом таом) - здоровое питание с доставкой
+КОМПАНИЯ: Sog'lom taom - здоровое питание с доставкой
 ЛОКАЦИЯ: Ташкент, Сергели район
-ГРАФИК: пн-пт, суббота - выходной
 
 КАЛОРИИ И ЦЕНЫ:
 - 1000–1200 ккал — 84 000 сум
@@ -114,20 +109,12 @@ DEFAULT_CONFIG = {
     "api_hash": "",
     "phone": "",
     "mistral_key": "",
-    "mistral_model": "pixtral-12b-2409",
-    "text_model": "mistral-medium-latest",
     "system_prompt": DEFAULT_SYSTEM_PROMPT,
-    "ai_model": "glm-4",
 }
 
 DAYS_RU = {
     'monday': 'понедельник', 'tuesday': 'вторник', 'wednesday': 'среда',
     'thursday': 'четверг', 'friday': 'пятница', 'saturday': 'суббота', 'sunday': 'воскресенье'
-}
-
-PRICE_MAP = {
-    "1000-1200": 84000, "1400-1600": 98000,
-    "1800-2000": 112000, "2200-2500": 126000,
 }
 
 
@@ -145,47 +132,61 @@ class MessageLog:
     has_location: bool = False
 
 
-@dataclass
-class Lead:
-    id: str
-    timestamp: str
-    client_name: str
-    summary: str
-    confidence: float = 0.5
-    urgency: str = "medium"
-
-
 # ===========================================================================
 # AI PROXY MANAGER
 # ===========================================================================
 class AIProxyManager:
-    """Manages the AI Proxy server"""
+    """Manages the AI Proxy server with proper Node.js detection"""
 
     def __init__(self, status_callback=None):
         self.status_callback = status_callback
         self.process = None
         self.running = False
-        self.proxy_dir = self._find_proxy_dir()
+        self.proxy_dir = None
+        self.node_exe = None
+        self._find_paths()
 
-    def _find_proxy_dir(self) -> Optional[Path]:
-        """Find ai-proxy directory"""
-        # Check common locations
-        locations = []
+    def _find_paths(self):
+        """Find Node.js and ai-proxy directory"""
+        # Find Node.js
+        node_paths = []
         
         if getattr(sys, 'frozen', False):
             # Running as EXE
             exe_dir = Path(sys.executable).parent
-            locations.append(exe_dir / "ai-proxy")
-            locations.append(exe_dir.parent / "ai-proxy")
+            node_paths.append(exe_dir / "node" / "node.exe")
+            node_paths.append(exe_dir / "node-portable" / "node.exe")
+            node_paths.append(exe_dir.parent / "node" / "node.exe")
         
-        # Running as script
-        locations.append(Path(__file__).parent.parent / "ai-proxy")
-        locations.append(Path.cwd() / "ai-proxy")
+        # System Node.js
+        node_paths.append(Path("node.exe"))
+        node_paths.append(Path("node"))
         
-        for loc in locations:
-            if loc.exists() and (loc / "package.json").exists():
-                return loc
-        return None
+        # Check PATH
+        node_in_path = shutil.which("node")
+        if node_in_path:
+            node_paths.append(Path(node_in_path))
+        
+        for path in node_paths:
+            if path and path.exists():
+                self.node_exe = str(path)
+                break
+        
+        # Find ai-proxy directory
+        proxy_paths = []
+        
+        if getattr(sys, 'frozen', False):
+            exe_dir = Path(sys.executable).parent
+            proxy_paths.append(exe_dir / "ai-proxy")
+            proxy_paths.append(exe_dir.parent / "ai-proxy")
+        
+        proxy_paths.append(Path(__file__).parent.parent / "ai-proxy")
+        proxy_paths.append(Path.cwd() / "ai-proxy")
+        
+        for path in proxy_paths:
+            if path.exists() and (path / "package.json").exists():
+                self.proxy_dir = path
+                break
 
     def is_port_in_use(self, port: int) -> bool:
         try:
@@ -209,25 +210,42 @@ class AIProxyManager:
                 self.status_callback("✅ AI Proxy уже запущен")
             return True
 
+        # Check Node.js
+        if not self.node_exe:
+            if self.status_callback:
+                self.status_callback("⚠️ Node.js не найден - проверьте установку")
+            return False
+
+        # Check proxy directory
         if not self.proxy_dir:
             if self.status_callback:
-                self.status_callback("⚠️ AI Proxy не найден - используется прямой API")
+                self.status_callback("⚠️ ai-proxy папка не найдена")
             return False
 
         if self.status_callback:
-            self.status_callback("🚀 Запуск AI Proxy...")
+            self.status_callback(f"🚀 Запуск AI Proxy (node: {self.node_exe})...")
 
         try:
-            # Try node server.js first, then npm
+            # Check if standalone server exists
             server_js = self.proxy_dir / "server.js"
-            if server_js.exists():
-                cmd = ["node", "server.js"]
+            standalone = self.proxy_dir / ".next" / "standalone" / "server.js"
+            
+            if standalone.exists():
+                # Use standalone build
+                cmd = [self.node_exe, str(standalone)]
+                cwd = standalone.parent
+            elif server_js.exists():
+                cmd = [self.node_exe, "server.js"]
+                cwd = self.proxy_dir
             else:
-                cmd = ["npm", "run", "start"]
+                # Try npm
+                npm_cmd = shutil.which("npm") or "npm"
+                cmd = [npm_cmd, "run", "start"]
+                cwd = self.proxy_dir
 
             self.process = subprocess.Popen(
-                cmd, cwd=str(self.proxy_dir),
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                cmd, cwd=str(cwd),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
             )
 
@@ -239,14 +257,21 @@ class AIProxyManager:
                     if self.status_callback:
                         self.status_callback("✅ AI Proxy запущен!")
                     return True
+                
+                # Check if process died
+                if self.process.poll() is not None:
+                    stderr = self.process.stderr.read().decode() if self.process.stderr else ""
+                    if self.status_callback:
+                        self.status_callback(f"❌ AI Proxy упал: {stderr[:100]}")
+                    return False
 
             if self.status_callback:
-                self.status_callback("❌ AI Proxy не запустился")
+                self.status_callback("❌ AI Proxy не запустился за 30 сек")
             return False
 
         except Exception as e:
             if self.status_callback:
-                self.status_callback(f"❌ Ошибка: {e}")
+                self.status_callback(f"❌ Ошибка: {str(e)[:100]}")
             return False
 
     def stop(self):
@@ -275,8 +300,6 @@ class AIClient:
         now = datetime.now()
         time_context = f"\n\n[ВРЕМЯ: {now.strftime('%d.%m.%Y %H:%M')} ({DAYS_RU.get(now.strftime('%A').lower(), '')})]"
         time_context += f"\n[ДЕДЛАЙН: 21:00]"
-        if now.hour >= 21:
-            time_context += "\n[ВНИМАНИЕ: После 21:00!]"
 
         messages_with_time = messages.copy()
         if messages_with_time and messages_with_time[0]["role"] == "system":
@@ -285,7 +308,7 @@ class AIClient:
                 "content": messages_with_time[0]["content"] + time_context
             }
 
-        # Try proxy first
+        # Try proxy
         try:
             async with httpx.AsyncClient(timeout=60) as client:
                 response = await client.post(
@@ -294,38 +317,34 @@ class AIClient:
                 )
                 if response.status_code == 200:
                     return response.json()["choices"][0]["message"]["content"].strip()
-        except:
-            pass
-
-        raise Exception("AI API недоступен. Проверьте AI Proxy.")
+        except Exception as e:
+            raise Exception(f"AI API ошибка: {e}")
 
     async def vision(self, image_base64: str) -> str:
         """Analyze image"""
         mistral_key = self.config.get("mistral_key", "")
-        mistral_model = self.config.get("mistral_model", "pixtral-12b-2409")
 
-        # Try Mistral Vision API
+        # Try Mistral Vision API if key available
         if mistral_key:
             try:
                 url = "https://api.mistral.ai/v1/chat/completions"
                 headers = {"Authorization": f"Bearer {mistral_key}", "Content-Type": "application/json"}
                 
-                prompt = "Опиши это изображение. Если чек - укажи сумму. Если стикер - опиши эмоцию. Отвечай кратко."
-                
                 messages = [{
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": prompt},
+                        {"type": "text", "text": "Опиши изображение кратко. Если чек - сумма, если стикер - эмоция."},
                         {"type": "image_url", "image_url": {"url": image_base64}}
                     ]
                 }]
 
                 async with httpx.AsyncClient(timeout=60) as client:
-                    r = await client.post(url, headers=headers, json={"model": mistral_model, "messages": messages})
+                    r = await client.post(url, headers=headers, 
+                                         json={"model": "pixtral-12b-2409", "messages": messages})
                     if r.status_code == 200:
                         return r.json()["choices"][0]["message"]["content"].strip()
-            except Exception as e:
-                print(f"Mistral Vision error: {e}")
+            except:
+                pass
 
         # Try proxy vision
         try:
@@ -355,6 +374,7 @@ class BotManager:
         self.conversation_history: Dict[int, list] = {}
         self.phone_code_hash = None
         self._thread = None
+        self._client_ready = False
 
     def start_async_thread(self):
         if self._thread and self._thread.is_alive():
@@ -369,13 +389,15 @@ class BotManager:
 
     async def _create_client(self):
         if self.client:
-            return
+            return True
         api_id = self.config.get("api_id", "")
         api_hash = self.config.get("api_hash", "")
         if not api_id or not api_hash:
             raise Exception("Настройте API ID и API Hash")
         self.client = TelegramClient(str(SESSION_PATH), int(api_id), api_hash)
         await self.client.connect()
+        self._client_ready = True
+        return True
 
     def connect(self, phone: str, callback):
         async def _connect():
@@ -398,6 +420,9 @@ class BotManager:
     def sign_in(self, phone: str, code: str, callback):
         async def _sign_in():
             try:
+                if not self.client:
+                    callback("error", "Сначала нажмите 'Войти'")
+                    return
                 await self.client.sign_in(phone, code, phone_code_hash=self.phone_code_hash)
                 me = await self.client.get_me()
                 callback("signed_in", me.first_name if me else "")
@@ -408,6 +433,10 @@ class BotManager:
     def start_bot(self, callback):
         async def _start():
             try:
+                if not self.client:
+                    callback("error", "Сначала авторизуйтесь")
+                    return
+                    
                 @self.client.on(events.NewMessage(incoming=True))
                 async def handler(event):
                     if not self.running:
@@ -439,11 +468,7 @@ class BotManager:
                 if photo:
                     file_path = await self.client.download_media(photo, IMAGES_DIR)
                     with open(file_path, "rb") as f:
-                        image_data = f.read()
-                    ext = Path(file_path).suffix.lower()
-                    mime_types = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp'}
-                    mime_type = mime_types.get(ext, 'image/jpeg')
-                    return f"data:{mime_type};base64,{base64.b64encode(image_data).decode('utf-8')}"
+                        return f"data:image/jpeg;base64,{base64.b64encode(f.read()).decode()}"
             return None
         except:
             return None
@@ -454,14 +479,12 @@ class BotManager:
         sender_name = sender.first_name or "Unknown"
 
         image_base64 = None
-        media_type = "text"
         media_description = ""
         has_image = False
         has_location = False
 
         # Handle location
         if isinstance(event.media, (MessageMediaGeo, MessageMediaGeoLive)):
-            media_type = "location"
             has_location = True
             lat = event.media.geo.lat
             lon = event.media.geo.long
@@ -470,45 +493,17 @@ class BotManager:
 
         # Handle image
         elif isinstance(event.media, MessageMediaPhoto):
-            media_type = "image"
             has_image = True
             image_base64 = await self._download_image(event)
             if image_base64:
                 media_description = await self.ai_client.vision(image_base64)
                 self.message_callback("image", {"sender": sender_name, "desc": media_description})
 
-        # Handle sticker
-        elif event.media and hasattr(event.media, 'document'):
-            doc = event.media.document
-            if doc:
-                is_sticker = any(isinstance(a, DocumentAttributeSticker) for a in doc.attributes)
-                if is_sticker:
-                    media_type = "sticker"
-                    has_image = True
-                    file_path = await self.client.download_media(doc, IMAGES_DIR)
-                    try:
-                        from PIL import Image
-                        img = Image.open(file_path)
-                        if img.mode in ('RGBA', 'P'):
-                            img = img.convert('RGB')
-                        import io
-                        buf = io.BytesIO()
-                        img.save(buf, format='JPEG', quality=85)
-                        image_base64 = f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode()}"
-                    except:
-                        with open(file_path, "rb") as f:
-                            image_base64 = f"data:image/jpeg;base64,{base64.b64encode(f.read()).decode()}"
-                    
-                    if image_base64:
-                        media_description = await self.ai_client.vision(image_base64)
-
         # Build message
         if chat_id not in self.conversation_history:
             self.conversation_history[chat_id] = []
 
-        enriched_text = text
-        if media_description:
-            enriched_text = f"[{media_type.upper()}: {media_description}]\n{text}"
+        enriched_text = f"[MEDIA: {media_description}]\n{text}" if media_description else text
 
         self.conversation_history[chat_id].append({"role": "user", "content": enriched_text})
         if len(self.conversation_history[chat_id]) > 20:
@@ -523,16 +518,16 @@ class BotManager:
         })
 
         try:
-            response = await self.ai_client.chat(messages, self.config.get("ai_model", "glm-4"))
+            response = await self.ai_client.chat(messages)
             await event.reply(response)
             self.conversation_history[chat_id].append({"role": "assistant", "content": response})
             self.message_callback("message", {"sender": "AI", "text": response[:200], "direction": "out"})
         except Exception as e:
-            self.message_callback("error", f"AI Error: {e}")
+            self.message_callback("error", f"AI: {e}")
 
 
 # ===========================================================================
-# MAIN APPLICATION - Simple Clean UI
+# MAIN APPLICATION
 # ===========================================================================
 class NinjaApp:
     """Main Application"""
@@ -587,9 +582,6 @@ class NinjaApp:
         with open(LOGS_FILE, "w", encoding="utf-8") as f:
             json.dump([asdict(m) for m in self.messages[-500:]], f, ensure_ascii=False)
 
-    # =======================================================================
-    # UI - Using ONLY pack() everywhere to avoid grid/pack conflicts
-    # =======================================================================
     def setup_ui(self):
         if CTK_AVAILABLE:
             self.setup_ctk_ui()
@@ -597,208 +589,161 @@ class NinjaApp:
             self.setup_tk_ui()
 
     def setup_ctk_ui(self):
-        """Clean UI using only pack()"""
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
         self.root = ctk.CTk()
         self.root.title(f"🥷 Ninja Userbot v{VERSION}")
-        self.root.geometry("950x700")
+        self.root.geometry("900x650")
 
-        # Main container - all pack
         main = ctk.CTkFrame(self.root)
         main.pack(fill="both", expand=True, padx=10, pady=10)
 
         # Header
         header = ctk.CTkFrame(main, height=50)
         header.pack(fill="x", pady=(0, 10))
-        
-        ctk.CTkLabel(header, text="🥷 Ninja Userbot", font=("", 20, "bold")).pack(side="left", padx=10)
-        
+        ctk.CTkLabel(header, text="🥷 Ninja Userbot", font=("", 18, "bold")).pack(side="left", padx=10)
         self.status_label = ctk.CTkLabel(header, text="⏹ Offline", text_color="gray")
         self.status_label.pack(side="right", padx=10)
-
-        # Info
-        info = ctk.CTkLabel(main, text="Telegram Userbot для Sog'lom taom - автоответчик с AI", 
-                           text_color="#6b7280", font=("", 11))
-        info.pack(anchor="w", pady=(0, 10))
 
         # Stats
         stats = ctk.CTkFrame(main)
         stats.pack(fill="x", pady=(0, 10))
-
         self.stat_labels = {}
-        for text, color in [("Статус", "#10b981"), ("Сообщений", "#10b981"), ("Аккаунт", "#10b981")]:
-            frame = ctk.CTkFrame(stats, width=120)
-            frame.pack(side="left", padx=5, pady=5)
-            frame.pack_propagate(False)
-            
-            val = ctk.CTkLabel(frame, text="0", font=("", 16, "bold"), text_color=color)
-            val.pack(pady=(10, 0))
-            ctk.CTkLabel(frame, text=text, font=("", 10), text_color="gray").pack()
-            self.stat_labels[text] = val
+        for text in ["Статус", "Сообщений", "Аккаунт"]:
+            f = ctk.CTkFrame(stats, width=120)
+            f.pack(side="left", padx=5, pady=5)
+            f.pack_propagate(False)
+            v = ctk.CTkLabel(f, text="0" if text != "Статус" else "Stopped", font=("", 14, "bold"), text_color="#10b981")
+            v.pack(pady=(10, 0))
+            ctk.CTkLabel(f, text=text, font=("", 10), text_color="gray").pack()
+            self.stat_labels[text] = v
 
-        # Notebook for tabs
-        if CTK_AVAILABLE:
-            self.notebook = ctk.CTkTabview(main)
-            self.notebook.pack(fill="both", expand=True)
-            
-            self.notebook.add("🎮 Управление")
-            self.notebook.add("⚙️ Настройки")
-            self.notebook.add("📋 Логи")
-            
-            self.setup_control_tab()
-            self.setup_settings_tab()
-            self.setup_logs_tab()
-        else:
-            self.setup_tk_ui()
+        # Tabs
+        self.notebook = ctk.CTkTabview(main)
+        self.notebook.pack(fill="both", expand=True)
+        self.notebook.add("🎮 Управление")
+        self.notebook.add("⚙️ Настройки")
+        
+        self.setup_control_tab()
+        self.setup_settings_tab()
 
     def setup_control_tab(self):
-        """Control tab"""
         tab = self.notebook.tab("🎮 Управление")
         
-        # Auth frame
-        auth_frame = ctk.CTkFrame(tab)
-        auth_frame.pack(fill="x", pady=10, padx=10)
+        # Auth
+        auth = ctk.CTkFrame(tab)
+        auth.pack(fill="x", pady=10, padx=10)
+        ctk.CTkLabel(auth, text="📱 Авторизация Telegram", font=("", 13, "bold")).pack(pady=10)
         
-        ctk.CTkLabel(auth_frame, text="📱 Авторизация Telegram", font=("", 14, "bold")).pack(pady=10)
-        
-        row1 = ctk.CTkFrame(auth_frame, fg_color="transparent")
-        row1.pack(fill="x", padx=20, pady=5)
-        ctk.CTkLabel(row1, text="Телефон:", width=80).pack(side="left")
-        self.phone_entry = ctk.CTkEntry(row1, width=200, placeholder_text="+998...")
+        r1 = ctk.CTkFrame(auth, fg_color="transparent")
+        r1.pack(fill="x", padx=20, pady=5)
+        ctk.CTkLabel(r1, text="Телефон:", width=80).pack(side="left")
+        self.phone_entry = ctk.CTkEntry(r1, width=180, placeholder_text="+998...")
         self.phone_entry.pack(side="left", padx=10)
         self.phone_entry.insert(0, self.config.get("phone", ""))
-        ctk.CTkButton(row1, text="🔑 Войти", command=self.start_auth, width=100).pack(side="left")
+        ctk.CTkButton(r1, text="🔑 Войти", command=self.start_auth, width=90).pack(side="left")
         
-        row2 = ctk.CTkFrame(auth_frame, fg_color="transparent")
-        row2.pack(fill="x", padx=20, pady=5)
-        ctk.CTkLabel(row2, text="Код:", width=80).pack(side="left")
-        self.code_entry = ctk.CTkEntry(row2, width=100, placeholder_text="12345")
+        r2 = ctk.CTkFrame(auth, fg_color="transparent")
+        r2.pack(fill="x", padx=20, pady=5)
+        ctk.CTkLabel(r2, text="Код:", width=80).pack(side="left")
+        self.code_entry = ctk.CTkEntry(r2, width=80, placeholder_text="12345")
         self.code_entry.pack(side="left", padx=10)
-        ctk.CTkButton(row2, text="OK", command=self.submit_code, width=60).pack(side="left")
+        ctk.CTkButton(r2, text="OK", command=self.submit_code, width=50).pack(side="left")
 
-        # Control frame
-        ctrl_frame = ctk.CTkFrame(tab)
-        ctrl_frame.pack(fill="x", pady=10, padx=10)
+        # Control
+        ctrl = ctk.CTkFrame(tab)
+        ctrl.pack(fill="x", pady=10, padx=10)
+        ctk.CTkLabel(ctrl, text="🤖 Управление ботом", font=("", 13, "bold")).pack(pady=10)
         
-        ctk.CTkLabel(ctrl_frame, text="🤖 Управление ботом", font=("", 14, "bold")).pack(pady=10)
-        
-        btn_row = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
-        btn_row.pack(pady=10)
-        
-        self.start_btn = ctk.CTkButton(btn_row, text="▶️ Запустить бота", command=self.start_bot,
-                                       width=180, height=40, fg_color="#10b981")
+        btns = ctk.CTkFrame(ctrl, fg_color="transparent")
+        btns.pack(pady=10)
+        self.start_btn = ctk.CTkButton(btns, text="▶️ Запустить", command=self.start_bot, width=150, height=40, fg_color="#10b981")
         self.start_btn.pack(side="left", padx=10)
-        
-        self.stop_btn = ctk.CTkButton(btn_row, text="⏹️ Остановить", command=self.stop_bot,
-                                      width=180, height=40, fg_color="#ef4444", state="disabled")
+        self.stop_btn = ctk.CTkButton(btns, text="⏹️ Остановить", command=self.stop_bot, width=150, height=40, fg_color="#ef4444", state="disabled")
         self.stop_btn.pack(side="left", padx=10)
 
-        # Logs preview
-        logs_frame = ctk.CTkFrame(tab)
-        logs_frame.pack(fill="both", expand=True, pady=10, padx=10)
-        
-        ctk.CTkLabel(logs_frame, text="📋 Логи", font=("", 12, "bold")).pack(anchor="w", padx=10, pady=5)
-        
-        self.logs_text = ctk.CTkTextbox(logs_frame, height=200)
-        self.logs_text.pack(fill="both", expand=True, padx=10, pady=10)
+        # Logs
+        logs = ctk.CTkFrame(tab)
+        logs.pack(fill="both", expand=True, pady=10, padx=10)
+        ctk.CTkLabel(logs, text="📋 Логи", font=("", 12, "bold")).pack(anchor="w", padx=10, pady=5)
+        self.logs_text = ctk.CTkTextbox(logs, height=150)
+        self.logs_text.pack(fill="both", expand=True, padx=10, pady=5)
 
     def setup_settings_tab(self):
-        """Settings tab"""
         tab = self.notebook.tab("⚙️ Настройки")
-        
         scroll = ctk.CTkScrollableFrame(tab)
         scroll.pack(fill="both", expand=True, padx=10, pady=10)
 
         # Telegram
-        ctk.CTkLabel(scroll, text="📱 Telegram", font=("", 14, "bold"), text_color="#10b981").pack(anchor="w", pady=(10, 5))
+        ctk.CTkLabel(scroll, text="📱 Telegram (my.telegram.org)", font=("", 13, "bold"), text_color="#10b981").pack(anchor="w", pady=(10, 5))
         
         r1 = ctk.CTkFrame(scroll, fg_color="transparent")
         r1.pack(fill="x", pady=3)
         ctk.CTkLabel(r1, text="API ID:", width=100).pack(side="left")
-        self.api_id_entry = ctk.CTkEntry(r1, width=300)
+        self.api_id_entry = ctk.CTkEntry(r1, width=280)
         self.api_id_entry.pack(side="left", padx=10)
         self.api_id_entry.insert(0, self.config.get("api_id", ""))
         
         r2 = ctk.CTkFrame(scroll, fg_color="transparent")
         r2.pack(fill="x", pady=3)
         ctk.CTkLabel(r2, text="API Hash:", width=100).pack(side="left")
-        self.api_hash_entry = ctk.CTkEntry(r2, width=300, show="*")
+        self.api_hash_entry = ctk.CTkEntry(r2, width=280, show="*")
         self.api_hash_entry.pack(side="left", padx=10)
         self.api_hash_entry.insert(0, self.config.get("api_hash", ""))
-        
-        ctk.CTkLabel(r2, text="(my.telegram.org)", text_color="gray", font=("", 10)).pack(side="left")
 
         # Mistral
-        ctk.CTkLabel(scroll, text="🤖 Mistral AI (Vision)", font=("", 14, "bold"), text_color="#10b981").pack(anchor="w", pady=(20, 5))
-        
+        ctk.CTkLabel(scroll, text="🤖 Mistral Vision API (опционально)", font=("", 13, "bold"), text_color="#10b981").pack(anchor="w", pady=(20, 5))
         r3 = ctk.CTkFrame(scroll, fg_color="transparent")
         r3.pack(fill="x", pady=3)
         ctk.CTkLabel(r3, text="API Key:", width=100).pack(side="left")
-        self.mistral_key_entry = ctk.CTkEntry(r3, width=300, show="*")
+        self.mistral_key_entry = ctk.CTkEntry(r3, width=280, show="*")
         self.mistral_key_entry.pack(side="left", padx=10)
         self.mistral_key_entry.insert(0, self.config.get("mistral_key", ""))
 
         # Prompt
-        ctk.CTkLabel(scroll, text="💬 Системный промпт", font=("", 14, "bold"), text_color="#10b981").pack(anchor="w", pady=(20, 5))
-        
-        self.prompt_text = ctk.CTkTextbox(scroll, height=250)
+        ctk.CTkLabel(scroll, text="💬 Системный промпт", font=("", 13, "bold"), text_color="#10b981").pack(anchor="w", pady=(20, 5))
+        self.prompt_text = ctk.CTkTextbox(scroll, height=200)
         self.prompt_text.pack(fill="x", pady=5)
         self.prompt_text.insert("1.0", self.config.get("system_prompt", DEFAULT_SYSTEM_PROMPT))
 
-        # Save
-        ctk.CTkButton(scroll, text="💾 Сохранить", command=self.save_settings, width=150, height=40).pack(pady=20)
-
-    def setup_logs_tab(self):
-        """Full logs tab"""
-        tab = self.notebook.tab("📋 Логи")
-        
-        self.full_logs = ctk.CTkTextbox(tab)
-        self.full_logs.pack(fill="both", expand=True, padx=10, pady=10)
+        ctk.CTkButton(scroll, text="💾 Сохранить", command=self.save_settings, width=140, height=35).pack(pady=15)
 
     def setup_tk_ui(self):
-        """Fallback tkinter UI"""
         self.root = tk.Tk()
         self.root.title(f"🥷 Ninja Userbot v{VERSION}")
-        self.root.geometry("900x700")
+        self.root.geometry("850x600")
 
         notebook = ttk.Notebook(self.root)
         notebook.pack(fill="both", expand=True, padx=5, pady=5)
 
-        # Control tab
         control = ttk.Frame(notebook)
         notebook.add(control, text="Управление")
         
-        # Auth
-        auth_frame = ttk.LabelFrame(control, text="Авторизация")
-        auth_frame.pack(fill="x", padx=10, pady=10)
+        auth = ttk.LabelFrame(control, text="Авторизация")
+        auth.pack(fill="x", padx=10, pady=10)
         
-        ttk.Label(auth_frame, text="Телефон:").grid(row=0, column=0, padx=5, pady=5)
-        self.phone_entry = ttk.Entry(auth_frame, width=20)
+        ttk.Label(auth, text="Телефон:").grid(row=0, column=0, padx=5, pady=5)
+        self.phone_entry = ttk.Entry(auth, width=20)
         self.phone_entry.grid(row=0, column=1, padx=5, pady=5)
         self.phone_entry.insert(0, self.config.get("phone", ""))
-        ttk.Button(auth_frame, text="Войти", command=self.start_auth).grid(row=0, column=2, padx=5)
+        ttk.Button(auth, text="Войти", command=self.start_auth).grid(row=0, column=2, padx=5)
         
-        ttk.Label(auth_frame, text="Код:").grid(row=1, column=0, padx=5, pady=5)
-        self.code_entry = ttk.Entry(auth_frame, width=10)
+        ttk.Label(auth, text="Код:").grid(row=1, column=0, padx=5, pady=5)
+        self.code_entry = ttk.Entry(auth, width=10)
         self.code_entry.grid(row=1, column=1, padx=5, pady=5)
-        ttk.Button(auth_frame, text="OK", command=self.submit_code).grid(row=1, column=2, padx=5)
+        ttk.Button(auth, text="OK", command=self.submit_code).grid(row=1, column=2, padx=5)
 
-        # Control
-        ctrl_frame = ttk.LabelFrame(control, text="Управление")
-        ctrl_frame.pack(fill="x", padx=10, pady=10)
-        
-        self.start_btn = ttk.Button(ctrl_frame, text="▶️ Запустить", command=self.start_bot)
+        ctrl = ttk.LabelFrame(control, text="Управление")
+        ctrl.pack(fill="x", padx=10, pady=10)
+        self.start_btn = ttk.Button(ctrl, text="▶️ Запустить", command=self.start_bot)
         self.start_btn.pack(side="left", padx=10, pady=10)
-        self.stop_btn = ttk.Button(ctrl_frame, text="⏹️ Остановить", command=self.stop_bot, state="disabled")
+        self.stop_btn = ttk.Button(ctrl, text="⏹️ Остановить", command=self.stop_bot, state="disabled")
         self.stop_btn.pack(side="left", padx=10, pady=10)
 
-        # Logs
         self.logs_text = scrolledtext.ScrolledText(control)
         self.logs_text.pack(fill="both", expand=True, padx=10, pady=10)
 
-        # Settings tab
         settings = ttk.Frame(notebook)
         notebook.add(settings, text="Настройки")
         
@@ -812,8 +757,8 @@ class NinjaApp:
         self.api_hash_entry.pack(anchor="w", padx=10)
         self.api_hash_entry.insert(0, self.config.get("api_hash", ""))
         
-        ttk.Label(settings, text="Системный промпт:").pack(anchor="w", padx=10, pady=10)
-        self.prompt_text = scrolledtext.ScrolledText(settings, height=15)
+        ttk.Label(settings, text="Промпт:").pack(anchor="w", padx=10, pady=10)
+        self.prompt_text = scrolledtext.ScrolledText(settings, height=12)
         self.prompt_text.pack(fill="both", expand=True, padx=10)
         self.prompt_text.insert("1.0", self.config.get("system_prompt", DEFAULT_SYSTEM_PROMPT))
         
@@ -822,9 +767,7 @@ class NinjaApp:
         self.status_label = ttk.Label(self.root, text="Готов")
         self.status_label.pack(fill="x", side="bottom")
 
-    # =======================================================================
-    # ACTIONS
-    # =======================================================================
+    # Actions
     def start_ai_proxy(self):
         self.add_log("System", "🚀 Запуск AI Proxy...", "system")
         threading.Thread(target=self.ai_proxy.start, daemon=True).start()
@@ -850,7 +793,7 @@ class NinjaApp:
         api_id = self.config.get("api_id", "")
         api_hash = self.config.get("api_hash", "")
         if not api_id or not api_hash:
-            messagebox.showerror("Ошибка", "Настройте API ID и API Hash в настройках")
+            messagebox.showerror("Ошибка", "Настройте API ID и API Hash")
             return
         self.bot.config = self.config
         self.bot.start_bot(lambda s, d: self.message_queue.put(("bot_start", (s, d))))
@@ -859,7 +802,7 @@ class NinjaApp:
         self.bot.stop_bot()
         self.start_btn.configure(state="normal")
         self.stop_btn.configure(state="disabled")
-        self.status_label.configure(text="⏹ Offline", text_color="gray")
+        self.status_label.configure(text="⏹ Offline")
         self.add_log("System", "Бот остановлен", "system")
 
     def save_settings(self):
@@ -884,18 +827,13 @@ class NinjaApp:
         self.save_data()
         self.message_count = len(self.messages)
         
-        # Update UI
         icon = "🖼️ " if has_image else "📍 " if has_location else ""
         line = f"[{log.timestamp}] {sender}: {icon}{text}\n"
         
         self.logs_text.insert("end", line)
         self.logs_text.see("end")
         
-        if hasattr(self, 'full_logs'):
-            self.full_logs.insert("end", line)
-            self.full_logs.see("end")
-        
-        if "Статус" in self.stat_labels:
+        if "Сообщений" in self.stat_labels:
             self.stat_labels["Сообщений"].configure(text=str(self.message_count))
 
     def process_messages(self):
@@ -918,7 +856,7 @@ class NinjaApp:
                     elif status == "signed_in":
                         self.bot_username = info
                         self.stat_labels["Аккаунт"].configure(text=info[:12])
-                        self.add_log("System", f"✅ Вход выполнен: {info}", "system")
+                        self.add_log("System", f"✅ Вход: {info}", "system")
                     elif status == "error":
                         self.add_log("Error", info, "system")
                         messagebox.showerror("Ошибка", info)
@@ -928,7 +866,7 @@ class NinjaApp:
                     if status == "started":
                         self.start_btn.configure(state="disabled")
                         self.stop_btn.configure(state="normal")
-                        self.status_label.configure(text="🟢 Online", text_color="#10b981")
+                        self.status_label.configure(text="🟢 Online")
                         self.stat_labels["Статус"].configure(text="Running")
                         self.add_log("System", "✅ Бот запущен!", "system")
                     elif status == "error":
@@ -943,7 +881,7 @@ class NinjaApp:
                     self.add_log(data["sender"], f"📍 {data['lat']:.4f}, {data['lon']:.4f}", "in", has_location=True)
                     
                 elif msg_type == "image":
-                    self.add_log(data["sender"], f"🖼️ {data['desc'][:100]}", "in", has_image=True)
+                    self.add_log(data["sender"], f"🖼️ {data['desc'][:80]}", "in", has_image=True)
                     
                 elif msg_type == "error":
                     self.add_log("Error", str(data), "system")
@@ -957,9 +895,6 @@ class NinjaApp:
         self.root.mainloop()
 
 
-# ===========================================================================
-# MAIN
-# ===========================================================================
 if __name__ == "__main__":
     app = NinjaApp()
     app.run()
