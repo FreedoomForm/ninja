@@ -123,20 +123,47 @@ def install_nodejs() -> None:
     log("Installing Node.js...")
     NODE_DIR.mkdir(parents=True, exist_ok=True)
 
-    data = download_bytes(NODE_URL)
-    with zipfile.ZipFile(io.BytesIO(data)) as zf:
-        # Extract to temp, then move
-        temp_dir = ROOT / "node_temp"
-        zf.extractall(temp_dir)
+    try:
+        data = download_bytes(NODE_URL)
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            # Extract to temp, then move
+            temp_dir = ROOT / "node_temp"
+            if temp_dir.exists():
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            zf.extractall(temp_dir)
 
-        # Move contents from node-v20.11.0-win-x64 to NODE_DIR
-        extracted = list(temp_dir.iterdir())[0]
-        for item in extracted.iterdir():
-            shutil.move(str(item), str(NODE_DIR / item.name))
+            # Move contents from node-v20.11.0-win-x64 to NODE_DIR
+            extracted = list(temp_dir.iterdir())[0]
+            log(f"Extracted Node.js from: {extracted}")
+            for item in extracted.iterdir():
+                dest = NODE_DIR / item.name
+                if dest.exists():
+                    if dest.is_dir():
+                        shutil.rmtree(dest, ignore_errors=True)
+                    else:
+                        dest.unlink()
+                shutil.move(str(item), str(dest))
+                log(f"Moved: {item.name}")
 
-        shutil.rmtree(temp_dir, ignore_errors=True)
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
-    log("Node.js installed")
+        # Verify installation
+        if NODE_EXE.exists():
+            log(f"node.exe installed at: {NODE_EXE}")
+        else:
+            log(f"WARNING: node.exe not found at {NODE_EXE}")
+
+        if NPM_EXE.exists():
+            log(f"npm.cmd installed at: {NPM_EXE}")
+        else:
+            log(f"WARNING: npm.cmd not found at {NPM_EXE}")
+            # List what we have
+            log(f"NODE_DIR contents: {[f.name for f in NODE_DIR.iterdir()]}")
+
+        log("Node.js installed")
+    except Exception as e:
+        log(f"ERROR installing Node.js: {e}")
+        raise
 
 
 def fetch_app() -> None:
@@ -209,23 +236,44 @@ def npm_install_ai_proxy() -> bool:
     """Install npm dependencies and build AI Proxy"""
     log("Installing AI Proxy dependencies...")
 
-    # npm install
-    result = subprocess.run(
-        [str(NPM_EXE), "install"],
-        cwd=str(AI_PROXY_DIR),
-        capture_output=True
-    )
+    # Проверяем наличие npm
+    if not NPM_EXE.exists():
+        log(f"ERROR: npm.cmd not found at {NPM_EXE}")
+        return False
+
+    if sys.platform == 'win32':
+        # npm install с shell=True
+        result = subprocess.run(
+            f'"{str(NPM_EXE)}" install',
+            cwd=str(AI_PROXY_DIR),
+            shell=True,
+            capture_output=True
+        )
+    else:
+        result = subprocess.run(
+            [str(NPM_EXE), "install"],
+            cwd=str(AI_PROXY_DIR),
+            capture_output=True
+        )
 
     if result.returncode != 0:
         log(f"npm install failed: {result.stderr.decode() if result.stderr else 'unknown'}")
         return False
 
     log("Building AI Proxy...")
-    result = subprocess.run(
-        [str(NPM_EXE), "run", "build"],
-        cwd=str(AI_PROXY_DIR),
-        capture_output=True
-    )
+    if sys.platform == 'win32':
+        result = subprocess.run(
+            f'"{str(NPM_EXE)}" run build',
+            cwd=str(AI_PROXY_DIR),
+            shell=True,
+            capture_output=True
+        )
+    else:
+        result = subprocess.run(
+            [str(NPM_EXE), "run", "build"],
+            cwd=str(AI_PROXY_DIR),
+            capture_output=True
+        )
 
     if result.returncode != 0:
         log(f"npm build failed: {result.stderr.decode() if result.stderr else 'unknown'}")
@@ -265,10 +313,25 @@ def start_ai_proxy():
     global ai_proxy_process
     log("Starting AI Proxy...")
 
+    # Проверяем существование файлов
+    if not NPM_EXE.exists():
+        log(f"ERROR: npm.cmd not found at {NPM_EXE}")
+        log(f"NODE_DIR contents: {list(NODE_DIR.iterdir()) if NODE_DIR.exists() else 'DIR NOT FOUND'}")
+        return
+
+    if not AI_PROXY_DIR.exists():
+        log(f"ERROR: AI Proxy dir not found at {AI_PROXY_DIR}")
+        return
+
+    log(f"Using npm: {NPM_EXE}")
+    log(f"Working dir: {AI_PROXY_DIR}")
+
     if sys.platform == 'win32':
+        # На Windows нужно использовать shell=True для .cmd файлов
         ai_proxy_process = subprocess.Popen(
-            [str(NPM_EXE), "run", "start"],
+            f'"{str(NPM_EXE)}" run start',
             cwd=str(AI_PROXY_DIR),
+            shell=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             creationflags=0x08000000  # CREATE_NO_WINDOW
