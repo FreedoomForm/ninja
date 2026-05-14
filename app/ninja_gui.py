@@ -788,6 +788,9 @@ class NinjaApp:
         # UI
         self.setup_ui()
         self.root.after(100, self.process_messages)
+        
+        # Auto-start AI Proxy on launch
+        self.root.after(500, self.start_ai_proxy)
 
     def _on_proxy_status(self, status: str):
         self.message_queue.put(("proxy_status", status))
@@ -1167,7 +1170,17 @@ class NinjaApp:
         self.bot.sign_in(phone, code, self._on_auth_result)
 
     def start_ai_proxy(self):
-        threading.Thread(target=self.ai_proxy.start, daemon=True).start()
+        """Start AI Proxy server automatically"""
+        self.add_log("System", "🚀 Запуск AI Proxy...", "system")
+        threading.Thread(target=self._start_proxy_thread, daemon=True).start()
+    
+    def _start_proxy_thread(self):
+        """Run AI Proxy start in background thread"""
+        success = self.ai_proxy.start()
+        if success:
+            self.message_queue.put(("proxy_ready", True))
+        else:
+            self.message_queue.put(("proxy_ready", False))
 
     def start_bot(self):
         api_id = self.config.get("api_id", "")
@@ -1406,6 +1419,12 @@ class NinjaApp:
                     
                 elif msg_type == "sticker":
                     self.add_log(data["sender"], f"🎭 Стикер: {data['description']}", "in", has_image=True)
+                    
+                elif msg_type == "proxy_ready":
+                    if data:  # success
+                        self.add_log("System", "✅ AI Proxy запущен и готов к работе", "system")
+                    else:
+                        self.add_log("Error", "❌ AI Proxy не удалось запустить", "error")
                     
                 elif msg_type == "error":
                     self.add_log("Error", str(data), "error")
