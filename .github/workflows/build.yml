@@ -19,32 +19,28 @@ jobs:
 
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install pyinstaller
-          pip install -r app/requirements.txt
+          pip install telethon httpx customtkinter Pillow cryptography
 
-      - name: Build EXE (Native GUI)
+      - name: Build EXE (Native Windows GUI)
         run: |
-          cd bootstrap
-          pyinstaller --onefile --noconsole --name ninja --icon=../app/icon.ico --add-data "../app/ninja_gui.py;." --add-data "../app/requirements.txt;." launcher.py
-        continue-on-error: true
+          pyinstaller --onefile --noconsole --name Ninja --clean app/ninja_gui.py
 
-      - name: Build EXE (Fallback without icon)
-        if: failure()
-        run: |
-          cd bootstrap
-          pyinstaller --onefile --noconsole --name ninja launcher.py
+      - name: List output
+        run: dir dist
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ninja-exe
-          path: bootstrap/dist/ninja.exe
+          path: dist/Ninja.exe
 
       - name: Create Release
         if: github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v1
         with:
           tag_name: v${{ github.run_number }}
-          files: bootstrap/dist/ninja.exe
+          files: dist/Ninja.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -14,24 +14,30 @@ if errorlevel 1 (
 
 REM Install dependencies
 echo Installing dependencies...
+python -m pip install --upgrade pip
 pip install pyinstaller
-pip install -r app/requirements.txt
+pip install telethon httpx customtkinter Pillow cryptography
 
 echo.
 echo Building EXE...
 echo.
 
-REM Build with PyInstaller
+REM Build with PyInstaller - no console, single file
 pyinstaller --onefile --noconsole --name Ninja --clean app/ninja_gui.py
 
 echo.
 if exist "dist\Ninja.exe" (
     echo ========================================
-    echo   SUCCESS! EXE created:
+    echo   SUCCESS! Native Windows EXE created:
     echo   dist\Ninja.exe
+    echo ========================================
+    echo.
+    echo   This is a standalone Windows application.
+    echo   No Python installation needed!
     echo ========================================
 ) else (
     echo ERROR: Build failed!
+    echo Check the output above for errors.
 )
 
 pause
