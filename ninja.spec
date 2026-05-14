@@ -1,7 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Ninja EXE Build Spec
-Включает все зависимости для standalone EXE
+Ninja EXE Build Spec - Standalone GUI Application
 """
 
 block_cipher = None
@@ -11,9 +10,6 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[
-        # Include main.py for bot execution
-        ('app/main.py', '.'),
-        ('app/requirements.txt', '.'),
         # Include web files
         ('app/web', 'web'),
     ],
@@ -71,7 +67,6 @@ a = Analysis(
         'h2.config',
         'h2.stream',
         'hyperframe',
-        'hyperhttp',
 
         # Cryptography
         'cryptography',
@@ -87,14 +82,7 @@ a = Analysis(
         'cryptography.hazmat.backends.default',
         'cryptography.hazmat.backends.openssl',
 
-        # Async
-        'asyncio',
-        'asyncio.subprocess',
-        'asyncio.threads',
-        'concurrent',
-        'concurrent.futures',
-
-        # Standard
+        # Standard library
         'json',
         'sqlite3',
         'socket',
@@ -121,70 +109,23 @@ a = Analysis(
         'signal',
         'io',
         'logging',
-        'logging.handlers',
-        'urllib',
-        'urllib.parse',
-        'urllib.request',
-        'uuid',
-        'random',
-        'math',
-        'functools',
-        'itertools',
-        'collections',
-        'enum',
-        'types',
-        'copy',
-        'warnings',
-        'traceback',
-        'weakref',
-        'gc',
-        'codecs',
-        'locale',
-        'gettext',
-        'numbers',
-        'decimal',
-        'fractions',
-        'statistics',
-        'calendar',
-        'argparse',
-        'configparser',
         'queue',
-        'mmap',
         'ctypes',
-        'ctypes.wintypes',
-        'winreg',
+        'asyncio',
     ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # Exclude unused modules to reduce size
+        # Exclude unused modules
         'tkinter.test',
         'unittest',
         'test',
         'tests',
-        'testing',
         'pytest',
         'IPython',
         'jupyter',
         'notebook',
-        'sphinx',
-        'docutils',
-        'email',
-        'html',
-        'xml',
-        'xmlrpc',
-        'multiprocessing',
-        'concurrent.futures.process',
-        'curses',
-        'pdb',
-        'profile',
-        'pstats',
-        'doctest',
-        'distutils',
-        'setuptools',
-        'pip',
-        'pkg_resources',
         'numpy',
         'pandas',
         'scipy',
@@ -192,6 +133,12 @@ a = Analysis(
         'cv2',
         'torch',
         'tensorflow',
+        'fastapi',
+        'uvicorn',
+        'starlette',
+        'pydantic',
+        'setuptools',
+        'pip',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -215,11 +162,10 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,  # No console window
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,  # Add icon path if needed
 )
