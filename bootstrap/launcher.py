@@ -14,6 +14,7 @@ import time
 import urllib.request
 import zipfile
 import threading
+import http.client
 from pathlib import Path
 
 # Скрыть консоль на Windows
@@ -143,7 +144,6 @@ def install_nodejs() -> None:
                     else:
                         dest.unlink()
                 shutil.move(str(item), str(dest))
-                log(f"Moved: {item.name}")
 
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -157,8 +157,6 @@ def install_nodejs() -> None:
             log(f"npm.cmd installed at: {NPM_EXE}")
         else:
             log(f"WARNING: npm.cmd not found at {NPM_EXE}")
-            # List what we have
-            log(f"NODE_DIR contents: {[f.name for f in NODE_DIR.iterdir()]}")
 
         log("Node.js installed")
     except Exception as e:
@@ -186,20 +184,22 @@ def fetch_ai_proxy() -> None:
 
     cache_buster = int(time.time())
 
-    # Core files needed for Next.js standalone
+    # Core files needed for Next.js
     ai_proxy_files = [
         "package.json",
+        "package-lock.json",
         "next.config.js",
         "tsconfig.json",
         "next-env.d.ts",
     ]
 
-    # App files
+    # App files - includes text, vision, and image generation APIs
     app_files = [
         "app/layout.tsx",
         "app/page.tsx",
         "app/api/ai/route.ts",
         "app/api/ai/vision/route.ts",
+        "app/api/image/route.ts",
         "app/api/chat/completions/route.ts",
     ]
 
@@ -210,6 +210,7 @@ def fetch_ai_proxy() -> None:
         dest = AI_PROXY_DIR / file_path
         try:
             download(url, dest)
+            log(f"Downloaded: {file_path}")
         except Exception as e:
             log(f"Warning: Could not download {file_path}: {e}")
 
@@ -241,8 +242,13 @@ def npm_install_ai_proxy() -> bool:
         log(f"ERROR: npm.cmd not found at {NPM_EXE}")
         return False
 
+    if not AI_PROXY_DIR.exists():
+        log(f"ERROR: AI Proxy dir not found at {AI_PROXY_DIR}")
+        return False
+
     if sys.platform == 'win32':
-        # npm install с shell=True
+        # npm install с shell=True для .cmd файлов
+        log("Running: npm install")
         result = subprocess.run(
             f'"{str(NPM_EXE)}" install',
             cwd=str(AI_PROXY_DIR),
@@ -308,6 +314,37 @@ def update_app() -> None:
         log(f"Update failed: {e}")
 
 
+def check_port(port: int) -> bool:
+    """Проверить, занят ли порт"""
+    try:
+        conn = http.client.HTTPConnection("localhost", port, timeout=1)
+        conn.request("GET", "/")
+        conn.getresponse()
+        return True
+    except:
+        return False
+
+
+def wait_for_service(port: int, path: str = "/", timeout: int = 30) -> bool:
+    """Ожидание запуска сервиса"""
+    log(f"Waiting for service on port {port}...")
+    
+    for i in range(timeout):
+        try:
+            conn = http.client.HTTPConnection("localhost", port, timeout=1)
+            conn.request("GET", path)
+            response = conn.getresponse()
+            if response.status < 500:
+                log(f"Service on port {port} is ready")
+                return True
+        except:
+            pass
+        time.sleep(1)
+    
+    log(f"Timeout waiting for service on port {port}")
+    return False
+
+
 def start_ai_proxy():
     """Start AI Proxy server in background"""
     global ai_proxy_process
@@ -317,14 +354,18 @@ def start_ai_proxy():
     if not NPM_EXE.exists():
         log(f"ERROR: npm.cmd not found at {NPM_EXE}")
         log(f"NODE_DIR contents: {list(NODE_DIR.iterdir()) if NODE_DIR.exists() else 'DIR NOT FOUND'}")
-        return
+        return False
 
     if not AI_PROXY_DIR.exists():
         log(f"ERROR: AI Proxy dir not found at {AI_PROXY_DIR}")
-        return
+        return False
 
     log(f"Using npm: {NPM_EXE}")
     log(f"Working dir: {AI_PROXY_DIR}")
+
+    if check_port(3000):
+        log("Port 3000 is already in use")
+        return True
 
     if sys.platform == 'win32':
         # На Windows нужно использовать shell=True для .cmd файлов
@@ -344,9 +385,13 @@ def start_ai_proxy():
             stderr=subprocess.DEVNULL
         )
 
-    # Wait a bit for server to start
-    time.sleep(5)
-    log("AI Proxy started on port 3000")
+    # Wait for service to start
+    if wait_for_service(3000, "/api/ai"):
+        log("AI Proxy started successfully on port 3000")
+        return True
+    else:
+        log("Failed to start AI Proxy")
+        return False
 
 
 def stop_ai_proxy():
@@ -370,7 +415,8 @@ def run_app() -> int:
     log(f"Launching {main_py}")
 
     # Start AI Proxy first
-    start_ai_proxy()
+    if not start_ai_proxy():
+        log("WARNING: AI Proxy not started, bot may not work properly")
 
     # Start bot
     if sys.platform == 'win32':
