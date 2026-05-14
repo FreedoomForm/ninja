@@ -17,25 +17,41 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install PyInstaller
-        run: pip install pyinstaller
-
-      - name: Build EXE from bootstrap/launcher.py
+      - name: Install all dependencies
         run: |
-          cd bootstrap
-          pyinstaller --onefile --noconsole --name ninja launcher.py
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install telethon
+          pip install customtkinter
+          pip install Pillow
+          pip install httpx
+          pip install cryptography
+          pip install fastapi
+          pip install uvicorn
+          pip install pydantic
+          pip install pydantic-settings
+          pip install h11 h2 hyperframe
+          pip install anyio sniffio starlette
+
+      - name: Build EXE with all dependencies
+        run: |
+          pyinstaller --clean ninja.spec
+
+      - name: Check EXE size
+        run: |
+          powershell -Command "$size = (Get-Item dist/Ninja.exe).Length / 1MB; Write-Host \"EXE size: $([math]::Round($size, 2)) MB\""
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ninja-exe
-          path: bootstrap/dist/ninja.exe
+          name: Ninja-EXE
+          path: dist/Ninja.exe
 
       - name: Create Release
         if: github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v1
         with:
           tag_name: v${{ github.run_number }}
-          files: bootstrap/dist/ninja.exe
+          files: dist/Ninja.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
