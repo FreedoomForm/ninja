@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install all dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install pyinstaller
@@ -26,14 +26,9 @@ jobs:
           pip install Pillow
           pip install httpx
           pip install cryptography
-          pip install fastapi
-          pip install uvicorn
-          pip install pydantic
-          pip install pydantic-settings
           pip install h11 h2 hyperframe
-          pip install anyio sniffio starlette
 
-      - name: Build EXE with all dependencies
+      - name: Build EXE
         run: |
           pyinstaller --clean ninja.spec
 

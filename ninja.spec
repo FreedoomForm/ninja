@@ -7,14 +7,15 @@ Ninja EXE Build Spec
 block_cipher = None
 
 a = Analysis(
-    ['app/main.py'],
+    ['app/ninja_gui.py'],
     pathex=[],
     binaries=[],
     datas=[
+        # Include main.py for bot execution
+        ('app/main.py', '.'),
+        ('app/requirements.txt', '.'),
         # Include web files
         ('app/web', 'web'),
-        # Include ai-proxy if exists
-        ('ai-proxy', 'ai-proxy'),
     ],
     hiddenimports=[
         # Telethon
@@ -85,37 +86,6 @@ a = Analysis(
         'cryptography.hazmat.backends',
         'cryptography.hazmat.backends.default',
         'cryptography.hazmat.backends.openssl',
-
-        # FastAPI & Uvicorn
-        'fastapi',
-        'fastapi.applications',
-        'fastapi.routing',
-        'fastapi.middleware',
-        'fastapi.middleware.cors',
-        'fastapi.responses',
-        'fastapi.staticfiles',
-        'pydantic',
-        'pydantic.fields',
-        'pydantic_settings',
-        'uvicorn',
-        'uvicorn.protocols',
-        'uvicorn.protocols.http',
-        'uvicorn.protocols.websockets',
-        'uvicorn.lifespan',
-        'uvicorn.lifespan.on',
-        'starlette',
-        'starlette.applications',
-        'starlette.routing',
-        'starlette.middleware',
-        'starlette.middleware.cors',
-        'starlette.responses',
-        'starlette.staticfiles',
-        'starlette.templating',
-        'anyio',
-        'anyio._core',
-        'anyio._backends',
-        'anyio._backends._asyncio',
-        'sniffio',
 
         # Async
         'asyncio',
