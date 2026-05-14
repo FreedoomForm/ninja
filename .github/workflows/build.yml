@@ -3,41 +3,39 @@ name: Build Ninja EXE
 on:
   push:
     branches: [main]
-    paths:
-      - 'ninja/**'
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: windows-latest
-    
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      
+
       - name: Install PyInstaller
         run: pip install pyinstaller
-      
+
       - name: Build EXE
         run: |
-          cd ninja/bootstrap
+          cd bootstrap
           pyinstaller --onefile --noconsole --name ninja launcher.py
-      
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ninja-exe
-          path: ninja/bootstrap/dist/ninja.exe
-      
+          path: bootstrap/dist/ninja.exe
+
       - name: Create Release
         if: github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v1
         with:
           tag_name: v${{ github.run_number }}
-          files: ninja/bootstrap/dist/ninja.exe
+          files: bootstrap/dist/ninja.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

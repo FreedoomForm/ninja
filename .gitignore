@@ -7,3 +7,5 @@ dist/
 *.session
 *.session-journal
 .env
+node_modules/
+.next/

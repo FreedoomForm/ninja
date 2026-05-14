@@ -13,11 +13,95 @@ import os
 import sys
 import base64
 import re
+import subprocess
+import time
+import threading
+import signal
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Union, Dict, List
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, asdict
+
+# ---------------------------------------------------------------------------
+# AI Proxy Auto-Start
+# ---------------------------------------------------------------------------
+AI_PROXY_DIR = Path(__file__).parent.parent / "ai-proxy"
+AI_PROXY_PORT = 3000
+ai_proxy_process = None
+
+def check_port(port: int) -> bool:
+    """Check if a port is in use"""
+    import socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(('localhost', port))
+        sock.close()
+        return False  # Port is free
+    except:
+        return True  # Port is in use
+
+def wait_for_port(port: int, timeout: int = 30) -> bool:
+    """Wait for a port to become available"""
+    print(f"⏳ Ожидание AI Proxy на порту {port}...")
+    for i in range(timeout):
+        if check_port(port):
+            print(f"✅ AI Proxy запущен на порту {port}")
+            return True
+        time.sleep(1)
+    print(f"⚠️ AI Proxy не запустился за {timeout} секунд")
+    return False
+
+def start_ai_proxy():
+    """Start the AI Proxy server in background"""
+    global ai_proxy_process
+    
+    # Check if already running
+    if check_port(AI_PROXY_PORT):
+        print(f"✅ AI Proxy уже запущен на порту {AI_PROXY_PORT}")
+        return True
+    
+    # Check if ai-proxy directory exists
+    if not AI_PROXY_DIR.exists():
+        print(f"⚠️ AI Proxy директория не найдена: {AI_PROXY_DIR}")
+        return False
+    
+    print(f"🚀 Запуск AI Proxy из {AI_PROXY_DIR}")
+    
+    # Start npm run start in background
+    try:
+        ai_proxy_process = subprocess.Popen(
+            ["npm", "run", "start"],
+            cwd=str(AI_PROXY_DIR),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        
+        # Wait for it to start
+        if wait_for_port(AI_PROXY_PORT, timeout=30):
+            print(f"🤖 AI Proxy: http://localhost:{AI_PROXY_PORT}")
+            print(f"💬 Chat API: http://localhost:{AI_PROXY_PORT}/api/ai")
+            print(f"🖼️ Vision API: http://localhost:{AI_PROXY_PORT}/api/ai/vision")
+            return True
+        else:
+            print("❌ Не удалось запустить AI Proxy")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Ошибка запуска AI Proxy: {e}")
+        return False
+
+def stop_ai_proxy():
+    """Stop the AI Proxy server"""
+    global ai_proxy_process
+    if ai_proxy_process:
+        print("🛑 Остановка AI Proxy...")
+        ai_proxy_process.terminate()
+        try:
+            ai_proxy_process.wait(timeout=5)
+        except:
+            ai_proxy_process.kill()
+        print("✅ AI Proxy остановлен")
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -2425,5 +2509,26 @@ async def get_web_ui():
 # Main
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
+    print("\n" + "=" * 50)
+    print("🥷 NINJA USERBOT - Sog'lom taom")
+    print("=" * 50)
+    
+    # Start AI Proxy first
+    print("\n🤖 Запуск AI Proxy (GLM)...")
+    start_ai_proxy()
+    
+    # Register cleanup on exit
+    import atexit
+    atexit.register(stop_ai_proxy)
+    
+    print("\n🐍 Запуск Python бота...")
+    print("=" * 50)
+    print("🌐 Web UI: http://localhost:3030")
+    print("📋 Для входа нужен номер телефона Telegram")
+    print("=" * 50 + "\n")
+    
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=3030)
+    try:
+        uvicorn.run(app, host="0.0.0.0", port=3030)
+    finally:
+        stop_ai_proxy()
