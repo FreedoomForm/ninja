@@ -1,6 +1,6 @@
 /**
  * Vision API Route for Image Analysis
- * Uses GLM Vision capabilities via z-ai-web-dev-sdk
+ * Uses VLM (Vision Language Model) via z-ai-web-dev-sdk
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -18,44 +18,57 @@ async function getZai() {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { image_base64, prompt = 'Describe this image', model = 'glm-4v' } = body;
+    const { 
+      image_base64, 
+      image_url, 
+      prompt = 'Describe this image in detail', 
+      model = 'glm-4v-flash' 
+    } = body;
 
-    if (!image_base64) {
+    if (!image_base64 && !image_url) {
       return NextResponse.json(
-        { error: 'image_base64 is required' },
+        { error: 'image_base64 or image_url is required' },
         { status: 400 }
       );
     }
 
     const zai = await getZai();
 
-    // Extract base64 data if it's a data URL
-    let base64Data = image_base64;
-    if (image_base64.startsWith('data:')) {
-      base64Data = image_base64.split(',')[1];
+    // Prepare image URL for VLM
+    let imageUrl: string;
+    if (image_base64) {
+      // Convert base64 to data URL
+      imageUrl = image_base64.startsWith('data:')
+        ? image_base64
+        : `data:image/jpeg;base64,${image_base64}`;
+    } else {
+      imageUrl = image_url!;
     }
 
-    // Create a text message with image description context
-    // Note: z-ai-web-dev-sdk text models don't support images directly
-    // We'll use the text model with a context about the image
+    // Use VLM (Vision Language Model) for image understanding
+    // The VLM skill handles multimodal input
     const completion = await zai.chat.completions.create({
       messages: [
         {
           role: 'user',
-          content: `${prompt}\n\n[Image data provided as base64: ${base64Data.substring(0, 100)}...]`,
+          content: [
+            { type: 'text', text: prompt },
+            { type: 'image_url', image_url: { url: imageUrl } },
+          ] as any,
         },
       ],
-      model: 'glm-4-flash', // Use text model
+      model: model,
       temperature: 0.7,
-      max_tokens: 1000,
+      max_tokens: 2000,
     });
 
     const description = completion.choices[0]?.message?.content || '';
 
     return NextResponse.json({
+      id: `vision-${Date.now()}`,
       description: description,
-      model: 'glm-4-flash',
-      note: 'Vision via text model',
+      model: model,
+      prompt: prompt,
     });
   } catch (error) {
     console.error('Vision API Error:', error);
@@ -70,7 +83,22 @@ export async function POST(request: NextRequest) {
 export async function GET() {
   return NextResponse.json({
     status: 'ok',
-    service: 'Vision API',
-    model: 'glm-4v',
+    service: 'Vision API - Image Analysis',
+    models: ['glm-4v-flash', 'glm-4v'],
+    usage: {
+      method: 'POST',
+      body: {
+        image_base64: 'string (optional) - Base64 encoded image',
+        image_url: 'string (optional) - URL of the image',
+        prompt: 'string (optional) - Question about the image',
+        model: 'string (optional) - Vision model, default: glm-4v-flash',
+      },
+    },
+    example: {
+      request: {
+        image_base64: '/9j/4AAQSkZJRg...',
+        prompt: 'What objects are in this image?'
+      }
+    }
   });
 }
