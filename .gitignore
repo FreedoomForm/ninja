@@ -1,11 +1,42 @@
+# Dependencies
+node_modules/
 __pycache__/
 *.pyc
-build/
-dist/
-*.spec
+*.pyo
 .venv/
+venv/
+env/
+
+# Build outputs
+dist/
+build/
+*.spec.bak
+*.egg-info/
+
+# Next.js
+.next/
+out/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Local data
 *.session
 *.session-journal
-.env
-node_modules/
-.next/
+data/
+.ninja-data/
+
+# Temporary
+*.tmp
+*.temp
+.cache/

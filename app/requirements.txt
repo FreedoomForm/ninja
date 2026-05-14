@@ -1,6 +1,14 @@
-fastapi==0.109.0
-uvicorn==0.27.0
+# Telegram
 telethon==1.36.0
+
+# HTTP Client
 httpx==0.27.2
-pydantic==2.6.0
+
+# GUI (modern Windows look)
+customtkinter==5.2.1
+
+# Image processing
 Pillow>=10.0.0
+
+# Cryptography (for Telegram)
+cryptography>=41.0.0

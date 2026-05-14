@@ -17,10 +17,19 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install PyInstaller
-        run: pip install pyinstaller
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller
+          pip install -r app/requirements.txt
 
-      - name: Build EXE
+      - name: Build EXE (Native GUI)
+        run: |
+          cd bootstrap
+          pyinstaller --onefile --noconsole --name ninja --icon=../app/icon.ico --add-data "../app/ninja_gui.py;." --add-data "../app/requirements.txt;." launcher.py
+        continue-on-error: true
+
+      - name: Build EXE (Fallback without icon)
+        if: failure()
         run: |
           cd bootstrap
           pyinstaller --onefile --noconsole --name ninja launcher.py
