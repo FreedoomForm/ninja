@@ -17,84 +17,27 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Build AI Proxy (Standalone)
-        run: |
-          cd ai-proxy
-          npm install
-          npm run build
-
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install pyinstaller
           pip install telethon httpx customtkinter Pillow cryptography
 
-      - name: Build EXE with PyInstaller
+      - name: Build standalone EXE
         run: |
           pyinstaller --onefile --noconsole --name Ninja --clean app/ninja_gui.py
 
-      - name: Download Node.js portable
-        run: |
-          curl -L -o node.zip https://nodejs.org/dist/v20.11.0/node-v20.11.0-win-x64.zip
-          powershell -Command "Expand-Archive node.zip -DestinationPath ."
-          mv node-v20.11.0-win-x64 node-portable
-
-      - name: Create standalone package
-        shell: cmd
-        run: |
-          mkdir dist\Ninja
-          move dist\Ninja.exe dist\Ninja\
-          
-          REM Copy Node.js portable
-          xcopy node-portable dist\Ninja\node\ /E /I /Y
-          
-          REM Copy AI Proxy
-          xcopy ai-proxy dist\Ninja\ai-proxy\ /E /I /Y
-          xcopy ai-proxy\.next\standalone dist\Ninja\ai-proxy\ /E /I /Y /D
-          xcopy ai-proxy\.next\static dist\Ninja\ai-proxy\.next\static\ /E /I /Y
-          if exist ai-proxy\public xcopy ai-proxy\public dist\Ninja\ai-proxy\public\ /E /I /Y
-          
-          REM Create launcher batch
-          echo @echo off > dist\Ninja\Start.bat
-          echo cd /d "%%~dp0" >> dist\Ninja\Start.bat
-          echo set PATH=%%cd%%\node;%%PATH%% >> dist\Ninja\Start.bat
-          echo start "" "Ninja.exe" >> dist\Ninja\Start.bat
-          
-          REM Create README
-          echo Ninja Userbot v4.0 - Standalone Windows App > dist\Ninja\README.txt
-          echo. >> dist\Ninja\README.txt
-          echo Запуск: >> dist\Ninja\README.txt
-          echo 1. Запустите Start.bat >> dist\Ninja\README.txt
-          echo 2. Введите API ID и API Hash в настройках >> dist\Ninja\README.txt
-          echo 3. Введите телефон и нажмите "Войти" >> dist\Ninja\README.txt
-          echo 4. Введите код из Telegram >> dist\Ninja\README.txt
-          echo 5. Нажмите "Запустить бота" >> dist\Ninja\README.txt
-          echo. >> dist\Ninja\README.txt
-          echo AI Proxy запускается автоматически! >> dist\Ninja\README.txt
-
-      - name: Upload EXE artifact
+      - name: Upload EXE
         uses: actions/upload-artifact@v4
         with:
           name: Ninja-EXE
           path: dist/Ninja.exe
-
-      - name: Upload Full Package
-        uses: actions/upload-artifact@v4
-        with:
-          name: Ninja-Standalone
-          path: dist/Ninja/
 
       - name: Create Release
         if: github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v1
         with:
           tag_name: v${{ github.run_number }}
-          files: |
-            dist/Ninja.exe
+          files: dist/Ninja.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
