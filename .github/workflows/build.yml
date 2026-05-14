@@ -39,27 +39,27 @@ jobs:
           pyinstaller --onefile --noconsole --name Ninja --clean app/ninja_gui.py
 
       - name: Create distribution package
+        shell: cmd
         run: |
           mkdir dist\Ninja
           move dist\Ninja.exe dist\Ninja\
           xcopy ai-proxy dist\Ninja\ai-proxy\ /E /I /Y
           xcopy ai-proxy\.next\standalone dist\Ninja\ai-proxy\ /E /I /Y /D
           xcopy ai-proxy\.next\static dist\Ninja\ai-proxy\.next\static\ /E /I /Y
-          xcopy ai-proxy\public dist\Ninja\ai-proxy\public\ /E /I /Y
+          if exist ai-proxy\public xcopy ai-proxy\public dist\Ninja\ai-proxy\public\ /E /I /Y
           
-          # Create startup batch file
           echo @echo off > dist\Ninja\Start.bat
           echo cd /d "%%~dp0" >> dist\Ninja\Start.bat
           echo start "" "Ninja.exe" >> dist\Ninja\Start.bat
           
-          # Create README
-          echo Ninja Userbot v2.0 > dist\Ninja\README.txt
+          echo Ninja Userbot v3.5 > dist\Ninja\README.txt
           echo. >> dist\Ninja\README.txt
           echo Installation: >> dist\Ninja\README.txt
           echo 1. Run Start.bat >> dist\Ninja\README.txt
           echo 2. Enter phone number and click "Login" >> dist\Ninja\README.txt
           echo 3. Enter Telegram code >> dist\Ninja\README.txt
-          echo 4. Click "Start AI Proxy" then "Start Bot" >> dist\Ninja\README.txt
+          echo 4. AI Proxy starts automatically >> dist\Ninja\README.txt
+          echo 5. Click "Start Bot" >> dist\Ninja\README.txt
 
       - name: Upload artifact (EXE only)
         uses: actions/upload-artifact@v4
