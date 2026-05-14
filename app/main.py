@@ -97,9 +97,10 @@ DEFAULT_CONFIG = {
     "mistral_key": "bz2Mp9E67ep1QfmaHzXBSJaRVOfIkx8v",
     "mistral_model": "pixtral-12b-2409",
     # OpenAI-compatible API (for text generation)
-    "api_base_url": "",
-    "api_key": "",
-    "model": "",
+    # Используйте http://localhost:3000/api/ai для GLM через Next.js API
+    "api_base_url": "http://localhost:3000/api/ai",
+    "api_key": "",  # Не нужен для GLM
+    "model": "glm-4",
     "system_prompt": "",
     "lead_prompt": "",
     # Courier usernames (comma-separated)
@@ -578,16 +579,16 @@ async def save_image_for_order(msg, chat_id: int, prefix: str = "check") -> Opti
         return None
 
 async def download_sticker_as_image(msg) -> Optional[str]:
-    """Download sticker and convert to base64 for Vision API"""
+    """Download sticker and convert to JPEG base64 for Vision API"""
     global client
     try:
         if not msg.media or not hasattr(msg.media, 'document'):
             return None
-        
+
         doc = msg.media.document
         if not doc:
             return None
-        
+
         # Check if it's a sticker
         is_sticker = False
         sticker_emoji = ""
@@ -596,40 +597,55 @@ async def download_sticker_as_image(msg) -> Optional[str]:
                 is_sticker = True
                 sticker_emoji = attr.alt or ""
                 break
-        
+
         if not is_sticker:
             return None
-        
+
         # Download sticker (usually webp format)
         file_path = await client.download_media(doc, IMAGES_DIR)
-        
-        # Read and encode
-        with open(file_path, "rb") as f:
-            image_data = f.read()
-        
-        # Convert to base64
-        base64_data = base64.b64encode(image_data).decode('utf-8')
-        
-        # Detect mime type
-        ext = Path(file_path).suffix.lower()
-        mime_types = {
-            '.webp': 'image/webp',
-            '.png': 'image/png', 
-            '.jpg': 'image/jpeg',
-            '.jpeg': 'image/jpeg',
-            '.gif': 'image/gif'
-        }
-        mime_type = mime_types.get(ext, 'image/webp')
-        
-        data_url = f"data:{mime_type};base64,{base64_data}"
-        
-        # Cleanup
+
+        # Try to convert webp to jpeg using PIL
         try:
-            os.remove(file_path)
-        except:
-            pass
-        
-        return data_url
+            from PIL import Image
+            img = Image.open(file_path)
+            # Convert to RGB if necessary (webp can have alpha)
+            if img.mode in ('RGBA', 'P'):
+                img = img.convert('RGB')
+
+            # Save as JPEG
+            jpeg_path = str(file_path).replace('.webp', '.jpg')
+            img.save(jpeg_path, 'JPEG', quality=85)
+
+            # Read JPEG and encode
+            with open(jpeg_path, "rb") as f:
+                image_data = f.read()
+
+            # Cleanup temp files
+            try:
+                os.remove(file_path)
+                os.remove(jpeg_path)
+            except:
+                pass
+
+            base64_data = base64.b64encode(image_data).decode('utf-8')
+            return f"data:image/jpeg;base64,{base64_data}"
+
+        except ImportError:
+            # PIL not available, use webp as is
+            with open(file_path, "rb") as f:
+                image_data = f.read()
+
+            base64_data = base64.b64encode(image_data).decode('utf-8')
+
+            # Cleanup
+            try:
+                os.remove(file_path)
+            except:
+                pass
+
+            # Try with webp, might work with some APIs
+            return f"data:image/jpeg;base64,{base64_data}"
+
     except Exception as e:
         print(f"Error downloading sticker: {e}")
         return None
@@ -641,7 +657,18 @@ async def describe_image_with_pixtral(image_url: str, mistral_key: str, model: s
     """Describe image using Pixtral vision model (Mistral)"""
     url = "https://api.mistral.ai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {mistral_key}", "Content-Type": "application/json"}
-    
+
+    # Check if image is too large (max ~20MB for base64)
+    if image_url.startswith("data:"):
+        try:
+            base64_part = image_url.split(",", 1)[1]
+            # Rough estimate: base64 is ~33% larger than original
+            estimated_size = len(base64_part) * 3 // 4
+            if estimated_size > 15 * 1024 * 1024:  # 15MB limit
+                return "изображение (слишком большое для обработки)"
+        except:
+            pass
+
     messages = [
         {
             "role": "user",
@@ -670,14 +697,60 @@ async def describe_image_with_pixtral(image_url: str, mistral_key: str, model: s
             ]
         }
     ]
-    
+
     payload = {"model": model, "messages": messages, "temperature": 0.7, "max_tokens": 500}
-    
-    async with httpx.AsyncClient(timeout=120) as http_client:
-        r = await http_client.post(url, headers=headers, json=payload)
-        if r.status_code != 200:
-            raise Exception(f"Pixtral API Error {r.status_code}: {r.text}")
-        return r.json()["choices"][0]["message"]["content"].strip()
+
+    try:
+        async with httpx.AsyncClient(timeout=120) as http_client:
+            r = await http_client.post(url, headers=headers, json=payload)
+            if r.status_code != 200:
+                error_text = r.text[:200] if r.text else "Unknown error"
+                print(f"Pixtral API Error {r.status_code}: {error_text}")
+                # Return generic description instead of failing
+                return "изображение"
+            return r.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        print(f"Vision API exception: {e}")
+        return "изображение"
+
+async def describe_image_with_glm(image_url: str) -> str:
+    """Describe image using GLM via Next.js API"""
+    url = "http://localhost:3000/api/ai/vision"
+
+    payload = {
+        "image_base64": image_url,
+        "prompt": """Проанализируй это изображение. Это может быть:
+
+1. Стикер из Telegram (мультяшное изображение, эмодзи-персонаж)
+2. Чек об оплате (перевод денег)
+3. Скриншот приложения банка
+4. Фото продукта или еды
+5. Другое
+
+ЕСЛИ ЭТО СТИКЕР:
+- Опиши какой эмоционал/настроение передаёт стикер
+- Опиши персонажа если есть (кот, медведь, человек и т.д.)
+- Какую реакцию ожидают от этого стикера (согласие, смех, грусть, благодарность)
+
+ЕСЛИ ЭТО ЧЕК/ПЕРЕВОД:
+- Сумму перевода
+- Дату и время если видны
+- Номер карты получателя если виден
+- Имя получателя если видно
+
+Отвечай на русском языке кратко и по делу (2-3 предложения)."""
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=120) as http_client:
+            r = await http_client.post(url, json=payload)
+            if r.status_code != 200:
+                print(f"GLM Vision API Error {r.status_code}")
+                return "изображение"
+            return r.json().get("description", "изображение")
+    except Exception as e:
+        print(f"GLM Vision exception: {e}")
+        return "изображение"
 
 async def call_openai_compatible(messages: list[dict], base_url: str, api_key: str, model: str) -> str:
     """Call any OpenAI-compatible API"""
@@ -1187,24 +1260,46 @@ async def handle_message(chat_id: int, sender: User, message):
                 break
     
     save_orders()
-    
+
     # Process image with Vision API BEFORE adding to history
     media_description = ""
     if context.has_image and context.image_url:
-        mistral_key = config.get("mistral_key", "")
-        mistral_model = config.get("mistral_model", "pixtral-12b-2409")
-        
-        if mistral_key:
-            try:
-                async with client.action(chat_id, "typing"):
-                    add_log("Обрабатываю изображение...", "System", "system")
-                    media_description = await describe_image_with_pixtral(
-                        context.image_url, mistral_key, mistral_model
-                    )
-                    add_log(f"Vision API: {media_description[:100]}...", "System", "system")
-            except Exception as e:
-                add_log(f"Vision API Error: {e}", "System", "error")
-                media_description = "изображение"
+        try:
+            async with client.action(chat_id, "typing"):
+                add_log("Обрабатываю изображение...", "System", "system")
+
+                # Сначала пробуем GLM Vision через локальный AI Proxy
+                try:
+                    media_description = await describe_image_with_glm(context.image_url)
+                    if media_description and media_description != "изображение":
+                        add_log(f"GLM Vision: {media_description[:100]}...", "System", "system")
+                    else:
+                        # Fallback на Pixtral если GLM не справился
+                        mistral_key = config.get("mistral_key", "")
+                        mistral_model = config.get("mistral_model", "pixtral-12b-2409")
+                        if mistral_key:
+                            media_description = await describe_image_with_pixtral(
+                                context.image_url, mistral_key, mistral_model
+                            )
+                            add_log(f"Pixtral Vision: {media_description[:100]}...", "System", "system")
+                except Exception as vision_error:
+                    # Fallback на Pixtral
+                    mistral_key = config.get("mistral_key", "")
+                    mistral_model = config.get("mistral_model", "pixtral-12b-2409")
+                    if mistral_key:
+                        try:
+                            media_description = await describe_image_with_pixtral(
+                                context.image_url, mistral_key, mistral_model
+                            )
+                            add_log(f"Pixtral Vision: {media_description[:100]}...", "System", "system")
+                        except:
+                            media_description = "изображение"
+                    else:
+                        media_description = "изображение"
+                        add_log(f"Vision Error: {vision_error}", "System", "error")
+        except Exception as e:
+            add_log(f"Vision API Error: {e}", "System", "error")
+            media_description = "изображение"
     
     # Add message to history with full context
     add_to_history(chat_id, "user", text, context, media_description)
@@ -1438,13 +1533,28 @@ async def get_config():
 @app.post("/api/config")
 async def update_config(cfg: ConfigModel):
     global config
-    save_config(cfg.model_dump())
+    new_config = cfg.model_dump()
+    # Preserve defaults for empty critical fields
+    if not new_config.get("api_id"):
+        new_config["api_id"] = DEFAULT_CONFIG["api_id"]
+    if not new_config.get("api_hash"):
+        new_config["api_hash"] = DEFAULT_CONFIG["api_hash"]
+    if not new_config.get("mistral_key"):
+        new_config["mistral_key"] = DEFAULT_CONFIG["mistral_key"]
+    if not new_config.get("mistral_model"):
+        new_config["mistral_model"] = DEFAULT_CONFIG["mistral_model"]
+    save_config(new_config)
     config = load_config()
     add_log("Настройки сохранены", "System", "system")
     return {"success": True}
 
 @app.post("/api/start")
 async def api_start_bot():
+    # Check required config before starting
+    if not config.get("api_id") or not config.get("api_hash"):
+        return {"success": False, "error": "Настройте API ID и API Hash"}
+    if not config.get("api_base_url") or not config.get("model"):
+        return {"success": False, "error": "Настройте API Base URL и Model для AI"}
     await start_bot()
     return {"success": True, "message": "Starting..."}
 
@@ -1970,9 +2080,16 @@ WEB_UI_HTML = '''<!DOCTYPE html>
             const btn = document.getElementById('btnStart');
             btn.disabled = true;
             btn.textContent = '⏳ Запуск...';
-            
+
             try {
-                await fetch('/api/start', { method: 'POST' });
+                const r = await fetch('/api/start', { method: 'POST' });
+                const d = await r.json();
+                if (d.error) {
+                    alert('Ошибка: ' + d.error);
+                    btn.disabled = false;
+                    btn.textContent = '▶️ Запустить';
+                    return;
+                }
                 setTimeout(checkAuth, 1000);
             } catch (e) {
                 console.error('Start error:', e);
@@ -2071,12 +2188,17 @@ WEB_UI_HTML = '''<!DOCTYPE html>
         }
 
         async function saveQuickConfig() {
+            // Load current config first, then merge
+            const r1 = await fetch('/api/config');
+            const current = await r1.json();
+
             const config = {
+                ...current,
                 api_base_url: document.getElementById('quickBaseUrl').value,
                 model: document.getElementById('quickModel').value,
                 api_key: document.getElementById('quickApiKey').value
             };
-            
+
             try {
                 await fetch('/api/config', {
                     method: 'POST',
@@ -2091,10 +2213,15 @@ WEB_UI_HTML = '''<!DOCTYPE html>
         }
 
         async function saveCouriers() {
+            // Load current config first, then merge
+            const r1 = await fetch('/api/config');
+            const current = await r1.json();
+
             const config = {
+                ...current,
                 couriers: document.getElementById('couriersInput').value
             };
-            
+
             try {
                 await fetch('/api/config', {
                     method: 'POST',
@@ -2108,18 +2235,23 @@ WEB_UI_HTML = '''<!DOCTYPE html>
         }
 
         async function saveFullConfig() {
+            // Load current config first, then merge
+            const r1 = await fetch('/api/config');
+            const current = await r1.json();
+
             const config = {
-                api_id: document.getElementById('apiId').value,
-                api_hash: document.getElementById('apiHash').value,
+                ...current,
+                api_id: document.getElementById('apiId').value || current.api_id,
+                api_hash: document.getElementById('apiHash').value || current.api_hash,
                 api_base_url: document.getElementById('apiBaseUrl').value,
                 api_key: document.getElementById('apiKey').value,
                 model: document.getElementById('modelName').value,
-                mistral_key: document.getElementById('mistralKey').value,
-                mistral_model: document.getElementById('mistralModel').value,
+                mistral_key: document.getElementById('mistralKey').value || current.mistral_key,
+                mistral_model: document.getElementById('mistralModel').value || current.mistral_model,
                 system_prompt: document.getElementById('systemPrompt').value,
                 couriers: document.getElementById('couriersInput').value
             };
-            
+
             try {
                 await fetch('/api/config', {
                     method: 'POST',
