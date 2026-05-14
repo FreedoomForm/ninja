@@ -7,7 +7,7 @@ httpx==0.27.2
 # GUI (modern Windows look)
 customtkinter==5.2.1
 
-# Image processing
+# Image processing (for stickers)
 Pillow>=10.0.0
 
 # Cryptography (for Telegram)

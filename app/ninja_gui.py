@@ -1,8 +1,8 @@
 """
-Ninja Userbot - Professional Native Windows Application
-========================================================
+Ninja Userbot - Complete Native Windows Application
+=====================================================
 Telegram Auto-Reply with AI using z-ai-web-sdk
-Beautiful native Windows UI with all features
+Full-featured: Images, Locations, Stickers, Orders, Leads
 """
 
 import tkinter as tk
@@ -14,13 +14,25 @@ import os
 import sys
 import subprocess
 import time
-import queue
 import socket
+import base64
+import re
+import queue
+import webbrowser
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, Dict, List
-from dataclasses import dataclass, asdict
-import webbrowser
+from typing import Optional, Dict, List, Union
+from dataclasses import dataclass, asdict, field
+
+# Hide console on Windows
+if sys.platform == 'win32':
+    try:
+        import ctypes
+        console = ctypes.windll.kernel32.GetConsoleWindow()
+        if console:
+            ctypes.windll.user32.ShowWindow(console, 0)
+    except:
+        pass
 
 # GUI imports
 try:
@@ -31,28 +43,17 @@ except ImportError:
 
 # Telegram
 from telethon import TelegramClient, events
-from telethon.tl.types import User, MessageMediaPhoto, MessageMediaGeo
+from telethon.tl.types import User, MessageMediaGeo, MessageMediaGeoLive, MessageMediaPhoto, DocumentAttributeSticker
 
 # HTTP client
 import httpx
 
-# ---------------------------------------------------------------------------
-# Hide Console
-# ---------------------------------------------------------------------------
-if sys.platform == 'win32':
-    try:
-        import ctypes
-        console = ctypes.windll.kernel32.GetConsoleWindow()
-        if console:
-            ctypes.windll.user32.ShowWindow(console, 0)
-    except:
-        pass
-
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# CONFIGURATION
+# ===========================================================================
 APP_NAME = "Ninja Userbot"
-VERSION = "2.0"
+VERSION = "3.0"
+
 DATA_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Ninja"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -64,22 +65,127 @@ ORDERS_FILE = DATA_DIR / "orders.json"
 IMAGES_DIR = DATA_DIR / "images"
 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
-# AI Proxy
 AI_PROXY_PORT = 3000
 AI_PROXY_URL = f"http://localhost:{AI_PROXY_PORT}/api/ai"
+AI_VISION_URL = f"http://localhost:{AI_PROXY_PORT}/api/ai/vision"
 
-# ---------------------------------------------------------------------------
-# Data Classes
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# COMPANY INFO
+# ===========================================================================
+COMPANY_INFO = """
+КОМПАНИЯ: Sog'lom taom (Соғлом таом) - здоровое питание с доставкой
+ЛОКАЦИЯ: Ташкент, Сергели район (ошхона)
+ГРАФИК: 5-дневка (пн-пт), шанба - день уборки
+
+ПАКЕТЫ:
+- Классик: стандартное меню
+- Индивидуал: можно исключить до 3 продуктов (аллергия/не нравится)
+- Диабет: специальное меню для диабетиков
+
+КАЛОРИИ И ЦЕНЫ:
+- 1000–1200 ккал — 84 000 сум
+- 1400–1600 ккал — 98 000 сум
+- 1800–2000 ккал — 112 000 сум
+- 2200–2500 ккал — 126 000 сум
+
+ДОСТАВКА:
+- Время: 17:00–22:00 по маршруту
+- Дни: воскр, пн, вт, ср, чт, пт (2 пакета в пт для сб и вс)
+- Заказ: До 21:00 за день до доставки
+
+КАРТЫ:
+- Humo: 9860010112421465
+- Uzum: 4916990324223715
+- Uzcard: 5614681209925290
+- Получатель: Xodjimuratov Bahodir
+"""
+
+DEFAULT_SYSTEM_PROMPT = """Ты Бахром, 35-летний сотрудник компании Sog'lom taom из Ташкента.
+Отвечаешь на сообщения клиентов в Telegram дружелюбно и профессионально.
+Общаешься на узбекском и русском языках.
+Используешь "Сиз" для новых клиентов, "Сен" для постоянных.
+
+""" + COMPANY_INFO + """
+
+ПОВЕДЕНИЕ ПРИ ПОЛУЧЕНИИ ЧЕКА:
+1. Подтверди: "Хоп, чек келди. Текшириб чикишамиз..."
+2. Спроси про дату доставки
+
+ПОВЕДЕНИЕ ПРИ ПОЛУЧЕНИИ ЛОКАЦИИ:
+1. Подтверди получение
+2. Спроси точный адрес
+
+ПОВЕДЕНИЕ ПРИ ОБСУЖДЕНИИ ДАТЫ ДОСТАВКИ:
+1. Проверь что не суббота
+2. Проверь что до 21:00
+3. Подтверди дату
+"""
+
+DEFAULT_LEAD_PROMPT = """Анализируй переписку и определи, является ли это лидом.
+
+УСПЕШНЫЙ ЛИД:
+- Готов сделать заказ
+- Прислал чек/локацию
+- Спросил про оплату
+
+Ответь в JSON:
+{
+  "is_lead": true/false,
+  "client_name": "имя",
+  "summary": "что нужно сделать"
+}
+"""
+
+DEFAULT_CONFIG = {
+    "api_id": "36244324",
+    "api_hash": "15657d847ab4b8ae111ade8e2cbca51f",
+    "phone": "",
+    "system_prompt": DEFAULT_SYSTEM_PROMPT,
+    "lead_prompt": DEFAULT_LEAD_PROMPT,
+    "ai_model": "glm-4",
+    "mistral_key": "bz2Mp9E67ep1QfmaHzXBSJaRVOfIkx8v",
+    "couriers": "",
+}
+
+# Days mapping
+DAYS_RU = {
+    'monday': 'понедельник', 'tuesday': 'вторник', 'wednesday': 'среда',
+    'thursday': 'четверг', 'friday': 'пятница', 'saturday': 'суббота', 'sunday': 'воскресенье'
+}
+
+# Price mapping
+PRICE_MAP = {
+    "1000-1200": 84000, "1400-1600": 98000,
+    "1800-2000": 112000, "2200-2500": 126000,
+}
+
+# ===========================================================================
+# DATA CLASSES
+# ===========================================================================
 @dataclass
-class Message:
-    id: str
-    timestamp: str
+class ClientOrder:
     chat_id: int
-    sender: str
-    text: str
-    direction: str  # in/out
-    ai_response: bool = False
+    client_name: str = ""
+    phone: str = ""
+    address: str = ""
+    location_url: str = ""
+    location_lat: float = 0.0
+    location_lon: float = 0.0
+    calories: str = ""
+    package_type: str = "classic"
+    days: int = 0
+    delivery_date: str = ""
+    price_per_day: int = 0
+    total_price: int = 0
+    payment_confirmed: bool = False
+    check_image_path: str = ""
+    notes: str = ""
+    created_at: str = ""
+    status: str = "pending"  # pending, confirmed, delivered
+
+    def to_dict(self):
+        return asdict(self)
+
 
 @dataclass
 class Lead:
@@ -88,57 +194,95 @@ class Lead:
     chat_id: int
     client_name: str
     summary: str
+    lead_type: str = "new"
+    urgency: str = "medium"
     status: str = "new"
 
-@dataclass
-class Order:
+
+@dataclass  
+class MessageLog:
     id: str
+    timestamp: str
     chat_id: int
-    client_name: str
-    phone: str = ""
-    address: str = ""
-    calories: str = ""
-    price: int = 0
-    status: str = "pending"
+    sender: str
+    text: str
+    direction: str
+    media_type: str = "text"
+    media_description: str = ""
 
-# ---------------------------------------------------------------------------
-# Company Configuration
-# ---------------------------------------------------------------------------
-COMPANY_INFO = """
-КОМПАНИЯ: Sog'lom taom (Соғлом таом) - здоровое питание с доставкой
-ЛОКАЦИЯ: Ташкент, Сергели район
-ГРАФИК: пн-пт, шанба - день уборки
 
-ПАКЕТЫ: Классик, Индивидуал, Диабет
+# ===========================================================================
+# HELPER FUNCTIONS
+# ===========================================================================
+def get_price_for_calories(calories: str) -> int:
+    """Get price based on calorie range"""
+    calories = calories.replace(" ", "").replace("ккал", "").replace("kcal", "")
+    for range_str, price in PRICE_MAP.items():
+        if range_str in calories or calories in range_str:
+            return price
+    try:
+        cal_val = int(calories.replace("-", "").replace("–", ""))
+        if cal_val <= 1200: return 84000
+        elif cal_val <= 1600: return 98000
+        elif cal_val <= 2000: return 112000
+        else: return 126000
+    except:
+        return 0
 
-ЦЕНЫ:
-- 1000–1200 ккал — 84 000 сум
-- 1400–1600 ккал — 98 000 сум
-- 1800–2000 ккал — 112 000 сум
-- 2200–2500 ккал — 126 000 сум
 
-ДОСТАВКА: 17:00–22:00
-ЗАКАЗ: До 21:00 за день до доставки
-"""
+def check_delivery_date_possible(requested_date: datetime) -> dict:
+    """Check if delivery is possible on the requested date"""
+    now = datetime.now()
+    
+    # Saturday - kitchen closed
+    if requested_date.weekday() == 5:
+        next_day = requested_date + timedelta(days=1)
+        return {"possible": False, "reason": "В субботу кухня закрыта", "next_available": next_day.strftime("%d.%m.%Y")}
+    
+    # Check 21:00 deadline
+    if requested_date.date() == (now + timedelta(days=1)).date():
+        if now.hour >= 21:
+            day_after = now + timedelta(days=2)
+            if day_after.weekday() == 5:
+                day_after += timedelta(days=1)
+            return {"possible": False, "reason": "После 21:00 заказ на завтра невозможен", "next_available": day_after.strftime("%d.%m.%Y")}
+    
+    return {"possible": True, "reason": "OK", "next_available": requested_date.strftime("%d.%m.%Y")}
 
-DEFAULT_SYSTEM_PROMPT = """Ты Бахром, 35-летний сотрудник компании Sog'lom taom из Ташкента.
-Отвечаешь на сообщения клиентов в Telegram дружелюбно и профессионально.
-Общаешься на узбекском и русском языках.
-Используешь "Сиз" для новых клиентов, "Сен" для постоянных.
 
-""" + COMPANY_INFO
+def parse_delivery_date(text: str) -> Optional[datetime]:
+    """Parse delivery date from text"""
+    text = text.lower()
+    now = datetime.now()
+    
+    if any(w in text for w in ['сегодня', 'бугун', 'today', 'bugun']):
+        return now
+    if any(w in text for w in ['завтра', 'эртага', 'tomorrow', 'ertaga']):
+        return now + timedelta(days=1)
+    
+    day_mapping = {
+        'понедельник': 0, 'душанба': 0, 'пн': 0,
+        'вторник': 1, 'сешанба': 1, 'вт': 1,
+        'среда': 2, 'чоршанба': 2, 'ср': 2,
+        'четверг': 3, 'пайшанба': 3, 'чт': 3,
+        'пятница': 4, 'жума': 4, 'пт': 4,
+        'суббота': 5, 'шанба': 5, 'сб': 5,
+        'воскресенье': 6, 'якшанба': 6, 'вс': 6,
+    }
+    
+    for day_name, day_num in day_mapping.items():
+        if day_name in text:
+            days_ahead = day_num - now.weekday()
+            if days_ahead <= 0:
+                days_ahead += 7
+            return now + timedelta(days=days_ahead)
+    
+    return None
 
-DEFAULT_CONFIG = {
-    "api_id": "36244324",
-    "api_hash": "15657d847ab4b8ae111ade8e2cbca51f",
-    "phone": "",
-    "system_prompt": DEFAULT_SYSTEM_PROMPT,
-    "ai_model": "glm-4",
-}
 
-# ---------------------------------------------------------------------------
-# AI Proxy Manager
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# AI PROXY MANAGER
+# ===========================================================================
 class AIProxyManager:
     """Manages the AI Proxy server (Next.js with z-ai-web-sdk)"""
 
@@ -157,16 +301,13 @@ class AIProxyManager:
             return True
 
     def check_api_available(self) -> bool:
-        """Check if AI API is responding"""
         try:
-            import httpx
             r = httpx.get(f"http://localhost:{AI_PROXY_PORT}/api/ai", timeout=2)
             return r.status_code == 200
         except:
             return False
 
     def start(self) -> bool:
-        """Start the AI Proxy server"""
         if self.is_port_in_use(AI_PROXY_PORT) and self.check_api_available():
             if self.status_callback:
                 self.status_callback("✅ AI Proxy уже запущен")
@@ -181,24 +322,15 @@ class AIProxyManager:
             self.status_callback("🚀 Запуск AI Proxy...")
 
         try:
-            # Check for standalone build (server.js)
             server_js = self.proxy_dir / "server.js"
-            if server_js.exists():
-                # Use standalone server
-                cmd = ["node", "server.js"]
-            else:
-                # Use npm (development/regular build)
-                cmd = ["npm", "run", "start"]
+            cmd = ["node", "server.js"] if server_js.exists() else ["npm", "run", "start"]
 
             self.process = subprocess.Popen(
-                cmd,
-                cwd=str(self.proxy_dir),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                cmd, cwd=str(self.proxy_dir),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
             )
 
-            # Wait for server to start
             for i in range(30):
                 time.sleep(1)
                 if self.check_api_available():
@@ -217,7 +349,6 @@ class AIProxyManager:
             return False
 
     def stop(self):
-        """Stop the AI Proxy server"""
         if self.process:
             self.process.terminate()
             try:
@@ -226,37 +357,64 @@ class AIProxyManager:
                 self.process.kill()
         self.running = False
 
-# ---------------------------------------------------------------------------
-# AI Client
-# ---------------------------------------------------------------------------
+
+# ===========================================================================
+# AI CLIENT
+# ===========================================================================
 class AIClient:
     """Client for AI API calls"""
 
-    def __init__(self, base_url: str = AI_PROXY_URL):
+    def __init__(self, base_url: str = AI_PROXY_URL, vision_url: str = AI_VISION_URL):
         self.base_url = base_url
+        self.vision_url = vision_url
 
     async def chat(self, messages: list, model: str = "glm-4") -> str:
         """Send chat completion request"""
-        async with httpx.AsyncClient(timeout=60) as client:
+        # Add time context
+        now = datetime.now()
+        time_context = f"\n[ТЕКУЩЕЕ ВРЕМЯ: {now.strftime('%d.%m.%Y %H:%M')} ({DAYS_RU.get(now.strftime('%A').lower(), '')})]"
+        time_context += f"\n[ДЕДЛАЙН ЗАКАЗА: 21:00]"
+        
+        messages_with_time = messages.copy()
+        if messages_with_time and messages_with_time[0]["role"] == "system":
+            messages_with_time[0] = {"role": "system", "content": messages_with_time[0]["content"] + time_context}
+
+        async with httpx.AsyncClient(timeout=120) as client:
             response = await client.post(
                 self.base_url,
-                json={
-                    "messages": messages,
-                    "model": model,
-                    "temperature": 0.7,
-                    "max_tokens": 1000,
-                }
+                json={"messages": messages_with_time, "model": model, "temperature": 0.7, "max_tokens": 1000}
             )
             if response.status_code == 200:
                 return response.json()["choices"][0]["message"]["content"].strip()
-            else:
-                raise Exception(f"AI API Error: {response.status_code}")
+            raise Exception(f"AI API Error: {response.status_code}")
 
-# ---------------------------------------------------------------------------
-# Telegram Bot Manager
-# ---------------------------------------------------------------------------
+    async def vision(self, image_base64: str, prompt: str = None) -> str:
+        """Analyze image with Vision API"""
+        if prompt is None:
+            prompt = """Проанализируй это изображение.
+Если это СТИКЕР - опиши эмоцию и настроение.
+Если это ЧЕК - укажи сумму перевода.
+Если это ЛОКАЦИЯ/КАРТА - опиши место.
+Отвечай кратко (2-3 предложения)."""
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            try:
+                response = await client.post(
+                    self.vision_url,
+                    json={"image_base64": image_base64, "prompt": prompt}
+                )
+                if response.status_code == 200:
+                    return response.json().get("description", "изображение")
+            except:
+                pass
+        return "изображение"
+
+
+# ===========================================================================
+# BOT MANAGER
+# ===========================================================================
 class BotManager:
-    """Manages Telegram client with single event loop"""
+    """Manages Telegram client with full features"""
 
     def __init__(self, config: dict, message_callback, ai_client: AIClient):
         self.config = config
@@ -266,6 +424,7 @@ class BotManager:
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.running = False
         self.conversation_history: Dict[int, list] = {}
+        self.orders: Dict[int, ClientOrder] = {}
         self.phone_code_hash = None
         self._thread = None
         self.me = None
@@ -344,50 +503,171 @@ class BotManager:
     def stop_bot(self):
         self.running = False
 
+    async def _download_image(self, event) -> Optional[str]:
+        """Download image and return base64"""
+        try:
+            if not event.media:
+                return None
+            if isinstance(event.media, MessageMediaPhoto):
+                photo = event.media.photo
+                if photo:
+                    file_path = await self.client.download_media(photo, IMAGES_DIR)
+                    with open(file_path, "rb") as f:
+                        image_data = f.read()
+                    ext = Path(file_path).suffix.lower()
+                    mime_types = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp'}
+                    mime_type = mime_types.get(ext, 'image/jpeg')
+                    base64_data = base64.b64encode(image_data).decode('utf-8')
+                    return f"data:{mime_type};base64,{base64_data}"
+            return None
+        except Exception as e:
+            print(f"Error downloading image: {e}")
+            return None
+
+    async def _download_sticker(self, event) -> Optional[str]:
+        """Download sticker and convert to JPEG"""
+        try:
+            if not event.media or not hasattr(event.media, 'document'):
+                return None
+
+            doc = event.media.document
+            if not doc:
+                return None
+
+            is_sticker = False
+            sticker_emoji = ""
+            for attr in doc.attributes:
+                if isinstance(attr, DocumentAttributeSticker):
+                    is_sticker = True
+                    sticker_emoji = attr.alt or ""
+                    break
+
+            if not is_sticker:
+                return None
+
+            file_path = await self.client.download_media(doc, IMAGES_DIR)
+
+            try:
+                from PIL import Image
+                img = Image.open(file_path)
+                if img.mode in ('RGBA', 'P'):
+                    img = img.convert('RGB')
+                jpeg_path = str(file_path).replace('.webp', '.jpg')
+                img.save(jpeg_path, 'JPEG', quality=85)
+                with open(jpeg_path, "rb") as f:
+                    image_data = f.read()
+                try:
+                    os.remove(file_path)
+                    os.remove(jpeg_path)
+                except:
+                    pass
+                base64_data = base64.b64encode(image_data).decode('utf-8')
+                return f"data:image/jpeg;base64,{base64_data}"
+            except ImportError:
+                with open(file_path, "rb") as f:
+                    image_data = f.read()
+                try:
+                    os.remove(file_path)
+                except:
+                    pass
+                base64_data = base64.b64encode(image_data).decode('utf-8')
+                return f"data:image/jpeg;base64,{base64_data}"
+
+        except Exception as e:
+            print(f"Error downloading sticker: {e}")
+            return None
+
     async def _process_message(self, event, sender: User):
+        """Process incoming message with all features"""
         chat_id = event.chat_id
         text = event.text or ""
         sender_name = sender.first_name or "Unknown"
 
-        # Log incoming message
-        self.message_callback("message", {
-            "chat_id": chat_id,
-            "sender": sender_name,
-            "text": text,
-            "direction": "in"
-        })
+        # Check for media
+        image_base64 = None
+        media_type = "text"
+        media_description = ""
+        location_lat = 0.0
+        location_lon = 0.0
 
-        # Build conversation
+        # Handle location
+        if isinstance(event.media, (MessageMediaGeo, MessageMediaGeoLive)):
+            media_type = "location"
+            location_lat = event.media.geo.lat
+            location_lon = event.media.geo.long
+            media_description = f"Координаты: {location_lat:.4f}, {location_lon:.4f}"
+            location_url = f"https://maps.google.com/maps?q={location_lat},{location_lon}"
+            self.message_callback("location", {
+                "chat_id": chat_id, "sender": sender_name,
+                "lat": location_lat, "lon": location_lon, "url": location_url
+            })
+
+        # Handle image
+        elif isinstance(event.media, MessageMediaPhoto):
+            media_type = "image"
+            image_base64 = await self._download_image(event)
+            if image_base64:
+                # Use Vision API
+                media_description = await self.ai_client.vision(image_base64)
+                self.message_callback("image", {
+                    "chat_id": chat_id, "sender": sender_name,
+                    "description": media_description
+                })
+
+        # Handle sticker
+        elif event.media and hasattr(event.media, 'document'):
+            sticker_base64 = await self._download_sticker(event)
+            if sticker_base64:
+                media_type = "sticker"
+                media_description = await self.ai_client.vision(sticker_base64, 
+                    "Опиши этот стикер: какой персонаж, какую эмоцию выражает.")
+                self.message_callback("sticker", {
+                    "chat_id": chat_id, "sender": sender_name,
+                    "description": media_description
+                })
+
+        # Build message for AI
         if chat_id not in self.conversation_history:
             self.conversation_history[chat_id] = []
 
-        self.conversation_history[chat_id].append({"role": "user", "content": text})
+        # Add context to message
+        enriched_text = text
+        if media_description:
+            enriched_text = f"[{media_type.upper()}: {media_description}]\n{text}"
 
+        self.conversation_history[chat_id].append({"role": "user", "content": enriched_text})
+
+        # Keep last 15 messages
+        if len(self.conversation_history[chat_id]) > 15:
+            self.conversation_history[chat_id] = self.conversation_history[chat_id][-15:]
+
+        # Build messages for AI
         messages = [{"role": "system", "content": self.config.get("system_prompt", DEFAULT_SYSTEM_PROMPT)}]
-        messages.extend(self.conversation_history[chat_id][-15:])
+        messages.extend(self.conversation_history[chat_id])
+
+        # Notify UI
+        self.message_callback("message", {
+            "chat_id": chat_id, "sender": sender_name,
+            "text": enriched_text[:200], "direction": "in", "media_type": media_type
+        })
 
         try:
-            response = await self.ai_client.chat(
-                messages,
-                self.config.get("ai_model", "glm-4")
-            )
+            response = await self.ai_client.chat(messages, self.config.get("ai_model", "glm-4"))
             await event.reply(response)
             self.conversation_history[chat_id].append({"role": "assistant", "content": response})
 
-            # Log outgoing message
             self.message_callback("message", {
-                "chat_id": chat_id,
-                "sender": "AI",
-                "text": response,
-                "direction": "out"
+                "chat_id": chat_id, "sender": "AI",
+                "text": response[:200], "direction": "out"
             })
+
         except Exception as e:
             self.message_callback("error", f"AI Error: {e}")
 
 
-# ---------------------------------------------------------------------------
-# Main Application
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# MAIN APPLICATION
+# ===========================================================================
 class NinjaApp:
     """Main Application with Professional Windows UI"""
 
@@ -395,37 +675,31 @@ class NinjaApp:
         self.config = self.load_config()
         self.message_queue = queue.Queue()
 
-        # Data storage
-        self.messages: List[Message] = []
+        # Data
+        self.messages: List[MessageLog] = []
         self.leads: List[Lead] = []
-        self.orders: List[Order] = []
+        self.orders: Dict[int, ClientOrder] = {}
         self.load_data()
 
-        # AI Client
+        # AI
         self.ai_client = AIClient()
 
-        # AI Proxy Manager - look for ai-proxy next to EXE or in app directory
+        # AI Proxy
         if getattr(sys, 'frozen', False):
-            # Running as compiled EXE
-            exe_dir = Path(sys.executable).parent
-            proxy_dir = exe_dir / "ai-proxy"
+            proxy_dir = Path(sys.executable).parent / "ai-proxy"
         else:
-            # Running as script
             proxy_dir = Path(__file__).parent.parent / "ai-proxy"
-
         self.ai_proxy = AIProxyManager(proxy_dir, self._on_proxy_status)
 
-        # Bot Manager
+        # Bot
         self.bot = BotManager(self.config, self._on_bot_message, self.ai_client)
 
-        # Statistics
+        # Stats
         self.message_count = 0
         self.lead_count = 0
 
-        # Create UI
+        # UI
         self.setup_ui()
-
-        # Start message processor
         self.root.after(100, self.process_messages)
 
     def _on_proxy_status(self, status: str):
@@ -453,15 +727,16 @@ class NinjaApp:
             try:
                 with open(LOGS_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    self.messages = [Message(**m) for m in data[-500:]]
+                    self.messages = [MessageLog(**m) for m in data[-500:]]
             except:
                 pass
 
-        if LEADS_FILE.exists():
+        if ORDERS_FILE.exists():
             try:
-                with open(LEADS_FILE, "r", encoding="utf-8") as f:
+                with open(ORDERS_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    self.leads = [Lead(**l) for l in data]
+                    for k, v in data.items():
+                        self.orders[int(k)] = ClientOrder(**v)
             except:
                 pass
 
@@ -469,248 +744,158 @@ class NinjaApp:
         with open(LOGS_FILE, "w", encoding="utf-8") as f:
             json.dump([asdict(m) for m in self.messages[-500:]], f, indent=2, ensure_ascii=False)
 
-        with open(LEADS_FILE, "w", encoding="utf-8") as f:
-            json.dump([asdict(l) for l in self.leads], f, indent=2, ensure_ascii=False)
+        with open(ORDERS_FILE, "w", encoding="utf-8") as f:
+            json.dump({str(k): v.to_dict() for k, v in self.orders.items()}, f, indent=2, ensure_ascii=False)
 
-    # ========================================================================
-    # UI Setup
-    # ========================================================================
+    # =======================================================================
+    # UI SETUP
+    # =======================================================================
     def setup_ui(self):
-        """Setup professional Windows UI"""
         if CTK_AVAILABLE:
             self.setup_ctk_ui()
         else:
             self.setup_tk_ui()
 
     def setup_ctk_ui(self):
-        """Setup CustomTkinter UI (Modern Windows 11 style)"""
+        """Professional CustomTkinter UI"""
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
         self.root = ctk.CTk()
         self.root.title(f"🥷 Ninja Userbot v{VERSION}")
-        self.root.geometry("1200x800")
-        self.root.minsize(1000, 700)
+        self.root.geometry("1300x850")
+        self.root.minsize(1100, 750)
 
-        # Configure grid
-        self.root.grid_columnconfigure(0, weight=0)  # Sidebar
-        self.root.grid_columnconfigure(1, weight=1)  # Main content
+        self.root.grid_columnconfigure(0, weight=0)
+        self.root.grid_columnconfigure(1, weight=1)
         self.root.grid_rowconfigure(0, weight=1)
 
-        # ===== LEFT SIDEBAR =====
-        self.sidebar = ctk.CTkFrame(self.root, width=250, corner_radius=0)
+        # ===== SIDEBAR =====
+        self.sidebar = ctk.CTkFrame(self.root, width=280, corner_radius=0)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
         self.sidebar.grid_propagate(False)
 
         # Logo
-        ctk.CTkLabel(
-            self.sidebar,
-            text="🥷 NINJA",
-            font=("", 24, "bold")
-        ).pack(pady=20)
+        ctk.CTkLabel(self.sidebar, text="🥷 NINJA", font=("", 28, "bold")).pack(pady=20)
+        ctk.CTkLabel(self.sidebar, text=f"v{VERSION}", text_color="gray").pack()
 
-        # Navigation buttons
+        # Navigation
         self.nav_buttons = {}
         nav_items = [
             ("🏠 Главная", "main"),
             ("💬 Сообщения", "messages"),
-            ("👥 Лиды", "leads"),
             ("📦 Заказы", "orders"),
+            ("👥 Лиды", "leads"),
             ("⚙️ Настройки", "settings"),
         ]
 
         for text, key in nav_items:
             btn = ctk.CTkButton(
-                self.sidebar,
-                text=text,
-                command=lambda k=key: self.show_panel(k),
-                height=45,
-                anchor="w",
-                fg_color="transparent",
-                text_color=("gray10", "#DCE4EE"),
-                hover_color=("gray70", "gray30"),
-                corner_radius=10
+                self.sidebar, text=text, command=lambda k=key: self.show_panel(k),
+                height=50, anchor="w", fg_color="transparent",
+                text_color=("gray10", "#DCE4EE"), hover_color=("gray70", "gray30"), corner_radius=10
             )
-            btn.pack(fill="x", padx=10, pady=2)
+            btn.pack(fill="x", padx=10, pady=3)
             self.nav_buttons[key] = btn
 
-        # Status section at bottom of sidebar
-        self.status_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        self.status_frame.pack(side="bottom", fill="x", padx=10, pady=10)
+        # Status
+        status_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        status_frame.pack(side="bottom", fill="x", padx=10, pady=15)
 
-        # AI Proxy Status
         self.proxy_status_var = ctk.StringVar(value="⏹️ AI Proxy: Остановлен")
-        ctk.CTkLabel(
-            self.status_frame,
-            textvariable=self.proxy_status_var,
-            font=("", 12)
-        ).pack(anchor="w")
+        ctk.CTkLabel(status_frame, textvariable=self.proxy_status_var, font=("", 11)).pack(anchor="w")
 
-        # Bot Status
         self.bot_status_var = ctk.StringVar(value="⏹️ Бот: Остановлен")
-        ctk.CTkLabel(
-            self.status_frame,
-            textvariable=self.bot_status_var,
-            font=("", 12)
-        ).pack(anchor="w", pady=5)
+        ctk.CTkLabel(status_frame, textvariable=self.bot_status_var, font=("", 11)).pack(anchor="w", pady=5)
 
-        # Stats
-        self.stats_var = ctk.StringVar(value="📊 0 сообщений | 0 лидов")
-        ctk.CTkLabel(
-            self.status_frame,
-            textvariable=self.stats_var,
-            font=("", 12)
-        ).pack(anchor="w")
+        self.stats_var = ctk.StringVar(value="📊 0 сообщений | 0 лидов | 0 заказов")
+        ctk.CTkLabel(status_frame, textvariable=self.stats_var, font=("", 11)).pack(anchor="w")
 
-        # ===== RIGHT CONTENT AREA =====
+        # ===== CONTENT =====
         self.content = ctk.CTkFrame(self.root, corner_radius=0, fg_color="transparent")
         self.content.grid(row=0, column=1, sticky="nsew")
         self.content.grid_columnconfigure(0, weight=1)
         self.content.grid_rowconfigure(0, weight=1)
 
-        # Create panels
         self.panels = {}
         self.setup_main_panel()
         self.setup_messages_panel()
-        self.setup_leads_panel()
         self.setup_orders_panel()
+        self.setup_leads_panel()
         self.setup_settings_panel()
 
-        # Show main panel
         self.show_panel("main")
 
     def setup_main_panel(self):
-        """Main dashboard panel"""
+        """Main dashboard"""
         panel = ctk.CTkFrame(self.content, fg_color="transparent")
         panel.grid(row=0, column=0, sticky="nsew")
 
         # Title
-        ctk.CTkLabel(
-            panel,
-            text="🏠 Главная панель",
-            font=("", 28, "bold")
-        ).pack(pady=20)
+        ctk.CTkLabel(panel, text="🏠 Главная панель", font=("", 26, "bold")).pack(pady=15)
 
         # Auth Card
         auth_card = ctk.CTkFrame(panel)
         auth_card.pack(fill="x", padx=20, pady=10)
 
-        ctk.CTkLabel(
-            auth_card,
-            text="📱 Авторизация Telegram",
-            font=("", 18, "bold")
-        ).pack(pady=10)
+        ctk.CTkLabel(auth_card, text="📱 Авторизация Telegram", font=("", 16, "bold")).pack(pady=10)
 
-        # Phone input
         phone_frame = ctk.CTkFrame(auth_card, fg_color="transparent")
         phone_frame.pack(fill="x", padx=20, pady=5)
-
-        ctk.CTkLabel(phone_frame, text="Номер телефона:", width=150).pack(side="left")
+        ctk.CTkLabel(phone_frame, text="Телефон:", width=120).pack(side="left")
         self.phone_entry = ctk.CTkEntry(phone_frame, width=250, placeholder_text="+998...")
         self.phone_entry.pack(side="left", padx=10)
         self.phone_entry.insert(0, self.config.get("phone", ""))
 
-        self.auth_btn = ctk.CTkButton(
-            auth_card,
-            text="🔑 Войти в Telegram",
-            command=self.start_auth,
-            width=200,
-            height=40
-        )
+        self.auth_btn = ctk.CTkButton(auth_card, text="🔑 Войти в Telegram", command=self.start_auth, width=200, height=40)
         self.auth_btn.pack(pady=10)
 
-        # Code input frame
         self.code_frame = ctk.CTkFrame(auth_card, fg_color="transparent")
-        ctk.CTkLabel(self.code_frame, text="Код из Telegram:").pack(side="left")
+        ctk.CTkLabel(self.code_frame, text="Код:").pack(side="left")
         self.code_entry = ctk.CTkEntry(self.code_frame, width=100)
         self.code_entry.pack(side="left", padx=10)
-        ctk.CTkButton(
-            self.code_frame,
-            text="OK",
-            command=self.submit_code,
-            width=60
-        ).pack(side="left")
+        ctk.CTkButton(self.code_frame, text="OK", command=self.submit_code, width=60).pack(side="left")
 
         # Control Card
         control_card = ctk.CTkFrame(panel)
         control_card.pack(fill="x", padx=20, pady=10)
 
-        ctk.CTkLabel(
-            control_card,
-            text="🤖 Управление ботом",
-            font=("", 18, "bold")
-        ).pack(pady=10)
+        ctk.CTkLabel(control_card, text="🤖 Управление ботом", font=("", 16, "bold")).pack(pady=10)
 
         btn_frame = ctk.CTkFrame(control_card, fg_color="transparent")
         btn_frame.pack(pady=10)
 
         self.start_proxy_btn = ctk.CTkButton(
-            btn_frame,
-            text="🚀 Запустить AI Proxy",
-            command=self.start_ai_proxy,
-            width=200,
-            height=45,
-            fg_color="#1f6aa5",
-            hover_color="#144870"
+            btn_frame, text="🚀 Запустить AI Proxy", command=self.start_ai_proxy,
+            width=200, height=45, fg_color="#1f6aa5", hover_color="#144870"
         )
         self.start_proxy_btn.pack(side="left", padx=10)
 
         self.start_btn = ctk.CTkButton(
-            btn_frame,
-            text="▶️ Запустить бота",
-            command=self.start_bot,
-            width=200,
-            height=45,
-            fg_color="#2ecc71",
-            hover_color="#27ae60"
+            btn_frame, text="▶️ Запустить бота", command=self.start_bot,
+            width=200, height=45, fg_color="#2ecc71", hover_color="#27ae60"
         )
         self.start_btn.pack(side="left", padx=10)
 
         self.stop_btn = ctk.CTkButton(
-            btn_frame,
-            text="⏹️ Остановить",
-            command=self.stop_bot,
-            width=200,
-            height=45,
-            fg_color="#e74c3c",
-            hover_color="#c0392b",
-            state="disabled"
+            btn_frame, text="⏹️ Остановить", command=self.stop_bot,
+            width=200, height=45, fg_color="#e74c3c", hover_color="#c0392b", state="disabled"
         )
         self.stop_btn.pack(side="left", padx=10)
 
-        # Quick Stats Cards
+        # Stats Cards
         stats_frame = ctk.CTkFrame(panel, fg_color="transparent")
         stats_frame.pack(fill="x", padx=20, pady=20)
 
-        # Messages stat
-        msg_card = ctk.CTkFrame(stats_frame, width=150, height=100)
-        msg_card.pack(side="left", padx=10, pady=5)
-        msg_card.pack_propagate(False)
-
-        ctk.CTkLabel(msg_card, text="💬", font=("", 30)).pack(pady=5)
-        self.msg_count_label = ctk.CTkLabel(msg_card, text="0", font=("", 24, "bold"))
-        self.msg_count_label.pack()
-        ctk.CTkLabel(msg_card, text="Сообщений", font=("", 12)).pack()
-
-        # Leads stat
-        lead_card = ctk.CTkFrame(stats_frame, width=150, height=100)
-        lead_card.pack(side="left", padx=10, pady=5)
-        lead_card.pack_propagate(False)
-
-        ctk.CTkLabel(lead_card, text="👥", font=("", 30)).pack(pady=5)
-        self.lead_count_label = ctk.CTkLabel(lead_card, text="0", font=("", 24, "bold"))
-        self.lead_count_label.pack()
-        ctk.CTkLabel(lead_card, text="Лидов", font=("", 12)).pack()
-
-        # Orders stat
-        order_card = ctk.CTkFrame(stats_frame, width=150, height=100)
-        order_card.pack(side="left", padx=10, pady=5)
-        order_card.pack_propagate(False)
-
-        ctk.CTkLabel(order_card, text="📦", font=("", 30)).pack(pady=5)
-        self.order_count_label = ctk.CTkLabel(order_card, text="0", font=("", 24, "bold"))
-        self.order_count_label.pack()
-        ctk.CTkLabel(order_card, text="Заказов", font=("", 12)).pack()
+        for icon, label, attr in [("💬", "Сообщений", "msg"), ("👥", "Лидов", "lead"), ("📦", "Заказов", "order")]:
+            card = ctk.CTkFrame(stats_frame, width=150, height=100)
+            card.pack(side="left", padx=10, pady=5)
+            card.pack_propagate(False)
+            ctk.CTkLabel(card, text=icon, font=("", 28)).pack(pady=5)
+            lbl = ctk.CTkLabel(card, text="0", font=("", 22, "bold"))
+            lbl.pack()
+            setattr(self, f"{attr}_count_label", lbl)
+            ctk.CTkLabel(card, text=label, font=("", 11)).pack()
 
         self.panels["main"] = panel
 
@@ -721,66 +906,41 @@ class NinjaApp:
         panel.grid_columnconfigure(0, weight=1)
         panel.grid_rowconfigure(1, weight=1)
 
-        # Header
         header = ctk.CTkFrame(panel, fg_color="transparent")
         header.grid(row=0, column=0, sticky="ew", pady=10)
 
-        ctk.CTkLabel(
-            header,
-            text="💬 Сообщения",
-            font=("", 24, "bold")
-        ).pack(side="left", padx=20)
+        ctk.CTkLabel(header, text="💬 Сообщения", font=("", 22, "bold")).pack(side="left", padx=20)
+        ctk.CTkButton(header, text="🗑️ Очистить", command=self.clear_messages, width=100).pack(side="right", padx=20)
 
-        ctk.CTkButton(
-            header,
-            text="🗑️ Очистить",
-            command=self.clear_messages,
-            width=100
-        ).pack(side="right", padx=20)
-
-        # Messages list
         self.messages_frame = ctk.CTkScrollableFrame(panel)
         self.messages_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
 
         self.panels["messages"] = panel
+
+    def setup_orders_panel(self):
+        """Orders management panel"""
+        panel = ctk.CTkFrame(self.content, fg_color="transparent")
+        panel.grid(row=0, column=0, sticky="nsew")
+
+        ctk.CTkLabel(panel, text="📦 Заказы", font=("", 22, "bold")).pack(pady=20)
+
+        # Orders list placeholder
+        self.orders_frame = ctk.CTkScrollableFrame(panel)
+        self.orders_frame.pack(fill="both", expand=True, padx=20, pady=10)
+
+        self.panels["orders"] = panel
 
     def setup_leads_panel(self):
         """Leads panel"""
         panel = ctk.CTkFrame(self.content, fg_color="transparent")
         panel.grid(row=0, column=0, sticky="nsew")
 
-        ctk.CTkLabel(
-            panel,
-            text="👥 Лиды",
-            font=("", 24, "bold")
-        ).pack(pady=20)
+        ctk.CTkLabel(panel, text="👥 Лиды", font=("", 22, "bold")).pack(pady=20)
 
-        ctk.CTkLabel(
-            panel,
-            text="Здесь будут отображаться потенциальные клиенты",
-            text_color="gray"
-        ).pack()
+        self.leads_frame = ctk.CTkScrollableFrame(panel)
+        self.leads_frame.pack(fill="both", expand=True, padx=20, pady=10)
 
         self.panels["leads"] = panel
-
-    def setup_orders_panel(self):
-        """Orders panel"""
-        panel = ctk.CTkFrame(self.content, fg_color="transparent")
-        panel.grid(row=0, column=0, sticky="nsew")
-
-        ctk.CTkLabel(
-            panel,
-            text="📦 Заказы",
-            font=("", 24, "bold")
-        ).pack(pady=20)
-
-        ctk.CTkLabel(
-            panel,
-            text="Здесь будут отображаться заказы клиентов",
-            text_color="gray"
-        ).pack()
-
-        self.panels["orders"] = panel
 
     def setup_settings_panel(self):
         """Settings panel"""
@@ -789,27 +949,15 @@ class NinjaApp:
         panel.grid_columnconfigure(0, weight=1)
         panel.grid_rowconfigure(1, weight=1)
 
-        # Header
-        ctk.CTkLabel(
-            panel,
-            text="⚙️ Настройки",
-            font=("", 24, "bold")
-        ).grid(row=0, column=0, pady=20, sticky="w", padx=20)
+        ctk.CTkLabel(panel, text="⚙️ Настройки", font=("", 22, "bold")).grid(row=0, column=0, pady=15, sticky="w", padx=20)
 
-        # Settings content
         settings_frame = ctk.CTkScrollableFrame(panel)
         settings_frame.grid(row=1, column=0, sticky="nsew", padx=20, pady=10)
 
-        # Model setting
+        # Model
         model_frame = ctk.CTkFrame(settings_frame)
         model_frame.pack(fill="x", pady=5)
-
-        ctk.CTkLabel(
-            model_frame,
-            text="🤖 AI Модель:",
-            font=("", 14)
-        ).pack(side="left", padx=10)
-
+        ctk.CTkLabel(model_frame, text="🤖 AI Модель:", font=("", 13)).pack(side="left", padx=10)
         self.model_entry = ctk.CTkEntry(model_frame, width=200)
         self.model_entry.pack(side="left", padx=10)
         self.model_entry.insert(0, self.config.get("ai_model", "glm-4"))
@@ -817,78 +965,50 @@ class NinjaApp:
         # System prompt
         prompt_frame = ctk.CTkFrame(settings_frame)
         prompt_frame.pack(fill="both", expand=True, pady=10)
-
-        ctk.CTkLabel(
-            prompt_frame,
-            text="📝 Системный промпт:",
-            font=("", 14)
-        ).pack(anchor="w", padx=10, pady=5)
+        ctk.CTkLabel(prompt_frame, text="📝 Системный промпт:", font=("", 13)).pack(anchor="w", padx=10, pady=5)
 
         self.prompt_text = ctk.CTkTextbox(prompt_frame, height=300)
         self.prompt_text.pack(fill="both", expand=True, padx=10, pady=5)
         self.prompt_text.insert("1.0", self.config.get("system_prompt", DEFAULT_SYSTEM_PROMPT))
 
-        # Save button
-        ctk.CTkButton(
-            settings_frame,
-            text="💾 Сохранить настройки",
-            command=self.save_settings,
-            width=200,
-            height=40
-        ).pack(pady=20)
+        ctk.CTkButton(settings_frame, text="💾 Сохранить настройки", command=self.save_settings, width=200, height=40).pack(pady=15)
 
         self.panels["settings"] = panel
 
     def show_panel(self, key: str):
-        """Show a specific panel"""
-        # Update nav buttons
         for k, btn in self.nav_buttons.items():
-            if k == key:
-                btn.configure(fg_color=("gray75", "gray25"))
-            else:
-                btn.configure(fg_color="transparent")
-
-        # Show panel
+            btn.configure(fg_color=("gray75", "gray25") if k == key else "transparent")
         for k, panel in self.panels.items():
-            if k == key:
-                panel.grid(row=0, column=0, sticky="nsew")
-            else:
-                panel.grid_remove()
+            panel.grid(row=0, column=0, sticky="nsew") if k == key else panel.grid_remove()
 
-    # ========================================================================
-    # Fallback Tkinter UI
-    # ========================================================================
+    # =======================================================================
+    # FALLBACK TKINTER UI
+    # =======================================================================
     def setup_tk_ui(self):
-        """Fallback to standard Tkinter"""
         self.root = tk.Tk()
         self.root.title(f"🥷 Ninja Userbot v{VERSION}")
         self.root.geometry("1000x700")
 
-        # Notebook for tabs
         notebook = ttk.Notebook(self.root)
         notebook.pack(fill="both", expand=True, padx=5, pady=5)
 
-        # Main tab
         main_tab = ttk.Frame(notebook)
         notebook.add(main_tab, text="Главная")
         self.setup_tk_main_tab(main_tab)
 
-        # Messages tab
         messages_tab = ttk.Frame(notebook)
         notebook.add(messages_tab, text="Сообщения")
-        self.setup_tk_messages_tab(messages_tab)
+        self.messages_text = scrolledtext.ScrolledText(messages_tab)
+        self.messages_text.pack(fill="both", expand=True, padx=5, pady=5)
 
-        # Settings tab
         settings_tab = ttk.Frame(notebook)
         notebook.add(settings_tab, text="Настройки")
         self.setup_tk_settings_tab(settings_tab)
 
-        # Status bar
         self.status_var = tk.StringVar(value="Готов")
         ttk.Label(self.root, textvariable=self.status_var).pack(fill="x", side="bottom")
 
     def setup_tk_main_tab(self, parent):
-        # Auth
         auth_frame = ttk.LabelFrame(parent, text="Авторизация")
         auth_frame.pack(fill="x", padx=10, pady=10)
 
@@ -906,19 +1026,13 @@ class NinjaApp:
         self.code_entry.pack(side="left", padx=5)
         ttk.Button(code_frame, text="OK", command=self.submit_code).pack(side="left")
 
-        # Control
         control_frame = ttk.LabelFrame(parent, text="Управление")
         control_frame.pack(fill="x", padx=10, pady=10)
 
         self.start_btn = ttk.Button(control_frame, text="▶️ Запустить бота", command=self.start_bot)
         self.start_btn.pack(side="left", padx=10, pady=10)
-
         self.stop_btn = ttk.Button(control_frame, text="⏹️ Остановить", command=self.stop_bot, state="disabled")
         self.stop_btn.pack(side="left", padx=10, pady=10)
-
-    def setup_tk_messages_tab(self, parent):
-        self.messages_text = scrolledtext.ScrolledText(parent)
-        self.messages_text.pack(fill="both", expand=True, padx=5, pady=5)
 
     def setup_tk_settings_tab(self, parent):
         ttk.Label(parent, text="AI Модель:").pack(anchor="w", padx=10, pady=5)
@@ -933,15 +1047,13 @@ class NinjaApp:
 
         ttk.Button(parent, text="Сохранить", command=self.save_settings).pack(pady=10)
 
-    # ========================================================================
-    # Actions
-    # ========================================================================
+    # =======================================================================
+    # ACTIONS
+    # =======================================================================
     def start_ai_proxy(self):
-        """Start AI Proxy server"""
         threading.Thread(target=self.ai_proxy.start, daemon=True).start()
 
     def start_auth(self):
-        """Start Telegram authentication"""
         phone = self.phone_entry.get().strip()
         if not phone:
             messagebox.showerror("Ошибка", "Введите номер телефона")
@@ -956,20 +1068,16 @@ class NinjaApp:
         self.bot.connect(phone, callback)
 
     def submit_code(self):
-        """Submit verification code"""
         code = self.code_entry.get().strip()
         if not code:
             return
 
-        phone = self.config.get("phone", "")
-
         def callback(status, data):
             self.message_queue.put(("auth", f"{status}:{data}"))
 
-        self.bot.sign_in(phone, code, callback)
+        self.bot.sign_in(self.config.get("phone", ""), code, callback)
 
     def start_bot(self):
-        """Start the bot"""
         def callback(status, data):
             self.message_queue.put(("bot", f"{status}:{data}"))
 
@@ -985,7 +1093,6 @@ class NinjaApp:
         self.bot_status_var.set("✅ Бот: Работает")
 
     def stop_bot(self):
-        """Stop the bot"""
         self.bot.stop_bot()
 
         if CTK_AVAILABLE:
@@ -1016,55 +1123,41 @@ class NinjaApp:
                 widget.destroy()
 
     def add_message_to_ui(self, msg_data: dict):
-        """Add a message to the UI"""
+        """Add message to UI"""
         if not CTK_AVAILABLE:
-            text = f"[{datetime.now().strftime('%H:%M:%S')}] {msg_data['sender']}: {msg_data['text'][:100]}\n"
+            text = f"[{datetime.now().strftime('%H:%M:%S')}] {msg_data['sender']}: {msg_data['text']}\n"
             self.messages_text.insert(tk.END, text)
             self.messages_text.see(tk.END)
             return
 
-        # Create message card
         card = ctk.CTkFrame(self.messages_frame)
         card.pack(fill="x", pady=2, padx=5)
 
         direction = msg_data.get("direction", "in")
         color = "#2ecc71" if direction == "out" else "#3498db"
 
-        # Time
-        time_label = ctk.CTkLabel(
-            card,
-            text=datetime.now().strftime("%H:%M:%S"),
-            font=("", 10),
-            text_color="gray"
-        )
-        time_label.pack(anchor="w", padx=10, pady=2)
+        ctk.CTkLabel(card, text=datetime.now().strftime("%H:%M:%S"), font=("", 10), text_color="gray").pack(anchor="w", padx=10, pady=2)
 
-        # Sender with color
-        sender_label = ctk.CTkLabel(
-            card,
-            text=f"{'📤' if direction == 'out' else '📥'} {msg_data['sender']}",
-            font=("", 12, "bold"),
-            text_color=color
-        )
-        sender_label.pack(anchor="w", padx=10, pady=2)
+        icon = "📤" if direction == "out" else "📥"
+        media_type = msg_data.get("media_type", "text")
+        if media_type == "image":
+            icon = "🖼️"
+        elif media_type == "location":
+            icon = "📍"
+        elif media_type == "sticker":
+            icon = "😀"
 
-        # Text
-        text_label = ctk.CTkLabel(
-            card,
-            text=msg_data['text'][:200] + ("..." if len(msg_data['text']) > 200 else ""),
-            font=("", 11),
-            wraplength=600,
-            justify="left"
-        )
-        text_label.pack(anchor="w", padx=10, pady=5)
+        ctk.CTkLabel(card, text=f"{icon} {msg_data['sender']}", font=("", 12, "bold"), text_color=color).pack(anchor="w", padx=10, pady=2)
+
+        ctk.CTkLabel(card, text=msg_data['text'][:300], font=("", 11), wraplength=600, justify="left").pack(anchor="w", padx=10, pady=5)
 
     def update_stats(self):
-        """Update statistics display"""
-        self.stats_var.set(f"📊 {self.message_count} сообщений | {self.lead_count} лидов")
+        self.stats_var.set(f"📊 {self.message_count} сообщений | {self.lead_count} лидов | {len(self.orders)} заказов")
 
         if CTK_AVAILABLE:
             self.msg_count_label.configure(text=str(self.message_count))
             self.lead_count_label.configure(text=str(self.lead_count))
+            self.order_count_label.configure(text=str(len(self.orders)))
 
     def process_messages(self):
         """Process messages from background threads"""
@@ -1102,6 +1195,31 @@ class NinjaApp:
                     self.add_message_to_ui(data)
                     self.update_stats()
 
+                elif msg_type == "image":
+                    self.message_callback("message", {
+                        "chat_id": data["chat_id"], "sender": data["sender"],
+                        "text": f"[IMAGE: {data['description']}]",
+                        "direction": "in", "media_type": "image"
+                    })
+
+                elif msg_type == "location":
+                    self.add_message_to_ui({
+                        "chat_id": data["chat_id"], "sender": data["sender"],
+                        "text": f"[LOCATION: {data['url']}]",
+                        "direction": "in", "media_type": "location"
+                    })
+                    self.message_count += 1
+                    self.update_stats()
+
+                elif msg_type == "sticker":
+                    self.add_message_to_ui({
+                        "chat_id": data["chat_id"], "sender": data["sender"],
+                        "text": f"[STICKER: {data['description']}]",
+                        "direction": "in", "media_type": "sticker"
+                    })
+                    self.message_count += 1
+                    self.update_stats()
+
                 elif msg_type == "error":
                     print(f"Error: {data}")
 
@@ -1111,13 +1229,12 @@ class NinjaApp:
         self.root.after(100, self.process_messages)
 
     def run(self):
-        """Run the application"""
         self.root.mainloop()
 
 
-# ---------------------------------------------------------------------------
-# Entry Point
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# ENTRY POINT
+# ===========================================================================
 def main():
     app = NinjaApp()
     app.run()
