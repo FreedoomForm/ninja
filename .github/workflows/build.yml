@@ -17,30 +17,68 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build AI Proxy (Standalone)
+        run: |
+          cd ai-proxy
+          npm install
+          npm run build
+
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install pyinstaller
           pip install telethon httpx customtkinter Pillow cryptography
 
-      - name: Build EXE (Native Windows GUI)
+      - name: Build EXE
         run: |
           pyinstaller --onefile --noconsole --name Ninja --clean app/ninja_gui.py
 
-      - name: List output
-        run: dir dist
+      - name: Create distribution package
+        run: |
+          mkdir dist\Ninja
+          move dist\Ninja.exe dist\Ninja\
+          xcopy ai-proxy dist\Ninja\ai-proxy\ /E /I /Y
+          xcopy ai-proxy\.next\standalone dist\Ninja\ai-proxy\ /E /I /Y /D
+          xcopy ai-proxy\.next\static dist\Ninja\ai-proxy\.next\static\ /E /I /Y
+          xcopy ai-proxy\public dist\Ninja\ai-proxy\public\ /E /I /Y
+          
+          # Create startup batch file
+          echo @echo off > dist\Ninja\Start.bat
+          echo cd /d "%%~dp0" >> dist\Ninja\Start.bat
+          echo start "" "Ninja.exe" >> dist\Ninja\Start.bat
+          
+          # Create README
+          echo Ninja Userbot v2.0 > dist\Ninja\README.txt
+          echo. >> dist\Ninja\README.txt
+          echo Installation: >> dist\Ninja\README.txt
+          echo 1. Run Start.bat >> dist\Ninja\README.txt
+          echo 2. Enter phone number and click "Login" >> dist\Ninja\README.txt
+          echo 3. Enter Telegram code >> dist\Ninja\README.txt
+          echo 4. Click "Start AI Proxy" then "Start Bot" >> dist\Ninja\README.txt
 
-      - name: Upload artifact
+      - name: Upload artifact (EXE only)
         uses: actions/upload-artifact@v4
         with:
-          name: Ninja-Windows-EXE
+          name: Ninja-EXE
           path: dist/Ninja.exe
+
+      - name: Upload artifact (Full package)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ninja-Full-Package
+          path: dist/Ninja/
 
       - name: Create Release
         if: github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v1
         with:
           tag_name: v${{ github.run_number }}
-          files: dist/Ninja.exe
+          files: |
+            dist/Ninja.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
