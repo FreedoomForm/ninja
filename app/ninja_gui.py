@@ -1,6 +1,7 @@
 """
 Ninja Userbot - Native Windows GUI Application
 Telegram Auto-Reply with AI (No web server, no localhost)
+Fixed: Proper async event loop handling for Telethon
 """
 
 import tkinter as tk
@@ -12,12 +13,21 @@ import os
 import sys
 import base64
 import re
-import webbrowser
+import queue
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, List
 from dataclasses import dataclass, asdict
-import queue
+
+# Hide console on Windows
+if sys.platform == 'win32':
+    try:
+        import ctypes
+        console = ctypes.windll.kernel32.GetConsoleWindow()
+        if console:
+            ctypes.windll.user32.ShowWindow(console, 0)
+    except:
+        pass
 
 # GUI imports
 try:
@@ -45,15 +55,11 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 SESSION_PATH = DATA_DIR / "ninja"
 CONFIG_FILE = DATA_DIR / "config.json"
 LOGS_FILE = DATA_DIR / "logs.json"
-LEADS_FILE = DATA_DIR / "leads.json"
-ORDERS_FILE = DATA_DIR / "orders.json"
 IMAGES_DIR = DATA_DIR / "images"
 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
 # AI API Configuration (Direct API calls, no proxy)
 AI_API_BASE = "https://open.bigmodel.cn/api/paas/v4"
-AI_API_KEY = ""  # Will be set from config
-AI_MODEL = "glm-4"
 
 # ---------------------------------------------------------------------------
 # Company Info
@@ -94,19 +100,6 @@ DEFAULT_CONFIG = {
 }
 
 # ---------------------------------------------------------------------------
-# Data Classes
-# ---------------------------------------------------------------------------
-@dataclass
-class ClientOrder:
-    chat_id: int
-    client_name: str = ""
-    phone: str = ""
-    address: str = ""
-    calories: str = ""
-    total_price: int = 0
-    payment_confirmed: bool = False
-
-# ---------------------------------------------------------------------------
 # AI Functions (Direct API)
 # ---------------------------------------------------------------------------
 async def call_ai_direct(messages: list, api_key: str, model: str = "glm-4") -> str:
@@ -117,7 +110,6 @@ async def call_ai_direct(messages: list, api_key: str, model: str = "glm-4") -> 
         "Content-Type": "application/json"
     }
 
-    # Add time context
     now = datetime.now()
     time_context = f"\n[ТЕКУЩЕЕ ВРЕМЯ: {now.strftime('%d.%m.%Y %H:%M')}]"
 
@@ -129,7 +121,6 @@ async def call_ai_direct(messages: list, api_key: str, model: str = "glm-4") -> 
             content = "\n".join(text_parts)
         clean_messages.append({"role": msg["role"], "content": str(content)})
 
-    # Add time to system message
     if clean_messages and clean_messages[0]["role"] == "system":
         clean_messages[0]["content"] += time_context
 
@@ -147,33 +138,144 @@ async def call_ai_direct(messages: list, api_key: str, model: str = "glm-4") -> 
         else:
             raise Exception(f"AI API Error: {response.status_code}")
 
-async def describe_image_with_ai(image_base64: str, api_key: str) -> str:
-    """Describe image using AI Vision API"""
-    url = f"{AI_API_BASE}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
 
-    messages = [{
-        "role": "user",
-        "content": [
-            {"type": "text", "text": "Опиши это изображение кратко. Если это чек - укажи сумму. Если стикер - опиши эмоцию."},
-            {"type": "image_url", "image_url": {"url": image_base64}}
-        ]
-    }]
+# ---------------------------------------------------------------------------
+# Async Bot Manager (Single Event Loop)
+# ---------------------------------------------------------------------------
+class BotManager:
+    """Manages Telegram client in a single async context"""
 
-    payload = {
-        "model": "glm-4v",
-        "messages": messages,
-        "max_tokens": 300,
-    }
+    def __init__(self, config: dict, message_callback):
+        self.config = config
+        self.message_callback = message_callback
+        self.client: Optional[TelegramClient] = None
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
+        self.running = False
+        self.conversation_history: Dict[int, list] = {}
+        self.phone_code_hash = None
+        self._thread = None
 
-    async with httpx.AsyncClient(timeout=120) as client:
-        response = await client.post(url, json=payload, headers=headers)
-        if response.status_code == 200:
-            return response.json()["choices"][0]["message"]["content"].strip()
-        return "изображение"
+    def start_async_thread(self):
+        """Start the async event loop in a separate thread"""
+        if self._thread and self._thread.is_alive():
+            return
+
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
+
+    def _run_loop(self):
+        """Run the event loop"""
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_forever()
+
+    def stop_async_thread(self):
+        """Stop the async event loop"""
+        if self.loop and self.loop.is_running():
+            self.loop.call_soon_threadsafe(self.loop.stop)
+
+    async def _create_client(self):
+        """Create Telegram client in the current loop"""
+        if self.client:
+            return
+
+        self.client = TelegramClient(
+            str(SESSION_PATH),
+            int(self.config.get("api_id", "0")),
+            self.config.get("api_hash", "")
+        )
+        await self.client.connect()
+
+    def connect(self, phone: str, callback):
+        """Connect and send code request"""
+        async def _connect():
+            try:
+                await self._create_client()
+                if await self.client.is_user_authorized():
+                    callback("authorized", "")
+                    return
+                result = await self.client.send_code_request(phone)
+                self.phone_code_hash = result.phone_code_hash
+                callback("code_sent", "")
+            except Exception as e:
+                callback("error", str(e))
+
+        if not self.loop:
+            self.start_async_thread()
+
+        asyncio.run_coroutine_threadsafe(_connect(), self.loop)
+
+    def sign_in(self, phone: str, code: str, callback):
+        """Sign in with code"""
+        async def _sign_in():
+            try:
+                await self.client.sign_in(phone, code, phone_code_hash=self.phone_code_hash)
+                callback("signed_in", "")
+            except Exception as e:
+                callback("error", str(e))
+
+        asyncio.run_coroutine_threadsafe(_sign_in(), self.loop)
+
+    def start_bot(self, callback):
+        """Start the message handler"""
+        async def _start():
+            try:
+                @self.client.on(events.NewMessage(incoming=True))
+                async def handler(event):
+                    if not self.running:
+                        return
+                    try:
+                        sender = await event.get_sender()
+                        if isinstance(sender, User) and not sender.bot:
+                            await self._process_message(event, sender)
+                    except Exception as e:
+                        self.message_callback("error", str(e))
+
+                self.running = True
+                callback("started", "")
+                # Keep running
+                while self.running:
+                    await asyncio.sleep(1)
+            except Exception as e:
+                callback("error", str(e))
+
+        asyncio.run_coroutine_threadsafe(_start(), self.loop)
+
+    def stop_bot(self):
+        """Stop the bot"""
+        self.running = False
+
+    async def _process_message(self, event, sender: User):
+        """Process incoming message"""
+        chat_id = event.chat_id
+        text = event.text or ""
+        sender_name = sender.first_name or "Unknown"
+
+        self.message_callback("message", f"{sender_name}: {text[:100]}")
+
+        if not self.config.get("ai_api_key"):
+            return
+
+        if chat_id not in self.conversation_history:
+            self.conversation_history[chat_id] = []
+
+        self.conversation_history[chat_id].append({"role": "user", "content": text})
+
+        messages = [{"role": "system", "content": self.config.get("system_prompt", DEFAULT_SYSTEM_PROMPT)}]
+        messages.extend(self.conversation_history[chat_id][-10:])
+
+        try:
+            response = await call_ai_direct(
+                messages,
+                self.config["ai_api_key"],
+                self.config.get("ai_model", "glm-4")
+            )
+            await event.reply(response)
+            self.conversation_history[chat_id].append({"role": "assistant", "content": response})
+            self.message_callback("response", response[:100])
+        except Exception as e:
+            self.message_callback("error", f"AI Error: {e}")
+
 
 # ---------------------------------------------------------------------------
 # Main Application Class
@@ -181,16 +283,22 @@ async def describe_image_with_ai(image_base64: str, api_key: str) -> str:
 class NinjaApp:
     def __init__(self):
         self.config = self.load_config()
-        self.client: Optional[TelegramClient] = None
-        self.bot_running = False
-        self.conversation_history: Dict[int, list] = {}
         self.message_queue = queue.Queue()
+        self.message_count = 0
+        self.lead_count = 0
+
+        # Create bot manager
+        self.bot = BotManager(self.config, self._on_bot_message)
 
         # Create GUI
         self.setup_gui()
 
         # Start message processor
-        self.process_messages()
+        self.root.after(100, self.process_messages)
+
+    def _on_bot_message(self, msg_type, data):
+        """Callback from bot manager"""
+        self.message_queue.put((msg_type, data))
 
     def load_config(self) -> dict:
         cfg = DEFAULT_CONFIG.copy()
@@ -238,8 +346,7 @@ class NinjaApp:
 
         # Status bar
         self.status_var = ctk.StringVar(value="⏹️ Бот остановлен")
-        self.status_bar = ctk.CTkLabel(self.root, textvariable=self.status_var,
-                                        height=30, corner_radius=0)
+        self.status_bar = ctk.CTkLabel(self.root, textvariable=self.status_var, height=30)
         self.status_bar.pack(fill="x", side="bottom")
 
     def setup_tk_gui(self):
@@ -248,90 +355,85 @@ class NinjaApp:
         self.root.title("🥷 Ninja Userbot")
         self.root.geometry("900x700")
 
-        # Notebook for tabs
         notebook = ttk.Notebook(self.root)
         notebook.pack(fill="both", expand=True, padx=5, pady=5)
 
-        # Main tab
         self.tab_main = ttk.Frame(notebook)
         notebook.add(self.tab_main, text="Главная")
         self.setup_main_tab_tk()
 
-        # Settings tab
         self.tab_settings = ttk.Frame(notebook)
         notebook.add(self.tab_settings, text="Настройки")
         self.setup_settings_tab_tk()
 
-        # Status bar
+        self.tab_logs = ttk.Frame(notebook)
+        notebook.add(self.tab_logs, text="Логи")
+        self.setup_logs_tab_tk()
+
         self.status_var = tk.StringVar(value="⏹️ Бот остановлен")
         status_bar = ttk.Label(self.root, textvariable=self.status_var)
         status_bar.pack(fill="x", side="bottom")
 
     def setup_main_tab(self):
         """Main control panel"""
-        if CTK_AVAILABLE:
-            # Top frame - Auth
-            auth_frame = ctk.CTkFrame(self.tab_main)
-            auth_frame.pack(fill="x", padx=10, pady=10)
+        if not CTK_AVAILABLE:
+            self.setup_main_tab_tk()
+            return
 
-            ctk.CTkLabel(auth_frame, text="📱 Авторизация Telegram",
-                        font=("", 16, "bold")).pack(pady=10)
+        # Auth frame
+        auth_frame = ctk.CTkFrame(self.tab_main)
+        auth_frame.pack(fill="x", padx=10, pady=10)
 
-            # Phone input
-            phone_frame = ctk.CTkFrame(auth_frame, fg_color="transparent")
-            phone_frame.pack(fill="x", padx=20, pady=5)
+        ctk.CTkLabel(auth_frame, text="📱 Авторизация Telegram",
+                    font=("", 16, "bold")).pack(pady=10)
 
-            ctk.CTkLabel(phone_frame, text="Телефон:").pack(side="left")
-            self.phone_entry = ctk.CTkEntry(phone_frame, width=200)
-            self.phone_entry.pack(side="left", padx=10)
-            self.phone_entry.insert(0, self.config.get("phone", ""))
+        # Phone input
+        phone_frame = ctk.CTkFrame(auth_frame, fg_color="transparent")
+        phone_frame.pack(fill="x", padx=20, pady=5)
 
-            # Auth button
-            self.auth_btn = ctk.CTkButton(auth_frame, text="🔑 Войти",
-                                          command=self.start_auth, width=150)
-            self.auth_btn.pack(pady=10)
+        ctk.CTkLabel(phone_frame, text="Телефон:").pack(side="left")
+        self.phone_entry = ctk.CTkEntry(phone_frame, width=200)
+        self.phone_entry.pack(side="left", padx=10)
+        self.phone_entry.insert(0, self.config.get("phone", ""))
 
-            # Code input (hidden initially)
-            self.code_frame = ctk.CTkFrame(auth_frame, fg_color="transparent")
-            ctk.CTkLabel(self.code_frame, text="Код:").pack(side="left")
-            self.code_entry = ctk.CTkEntry(self.code_frame, width=100)
-            self.code_entry.pack(side="left", padx=10)
-            self.code_btn = ctk.CTkButton(self.code_frame, text="OK",
-                                          command=self.submit_code, width=50)
-            self.code_btn.pack(side="left")
+        self.auth_btn = ctk.CTkButton(auth_frame, text="🔑 Войти",
+                                      command=self.start_auth, width=150)
+        self.auth_btn.pack(pady=10)
 
-            # Bot control
-            control_frame = ctk.CTkFrame(self.tab_main)
-            control_frame.pack(fill="x", padx=10, pady=10)
+        # Code input frame
+        self.code_frame = ctk.CTkFrame(auth_frame, fg_color="transparent")
+        ctk.CTkLabel(self.code_frame, text="Код:").pack(side="left")
+        self.code_entry = ctk.CTkEntry(self.code_frame, width=100)
+        self.code_entry.pack(side="left", padx=10)
+        self.code_btn = ctk.CTkButton(self.code_frame, text="OK",
+                                      command=self.submit_code, width=50)
+        self.code_btn.pack(side="left")
 
-            self.start_btn = ctk.CTkButton(control_frame, text="▶️ Запустить бота",
-                                           command=self.start_bot,
-                                           width=200, height=40,
-                                           fg_color="green", hover_color="darkgreen")
-            self.start_btn.pack(side="left", padx=20, pady=10)
+        # Control frame
+        control_frame = ctk.CTkFrame(self.tab_main)
+        control_frame.pack(fill="x", padx=10, pady=10)
 
-            self.stop_btn = ctk.CTkButton(control_frame, text="⏹️ Остановить",
-                                          command=self.stop_bot,
-                                          width=200, height=40,
-                                          fg_color="red", hover_color="darkred",
-                                          state="disabled")
-            self.stop_btn.pack(side="left", padx=20, pady=10)
+        self.start_btn = ctk.CTkButton(control_frame, text="▶️ Запустить бота",
+                                       command=self.start_bot, width=200, height=40,
+                                       fg_color="green", hover_color="darkgreen")
+        self.start_btn.pack(side="left", padx=20, pady=10)
 
-            # Stats
-            stats_frame = ctk.CTkFrame(self.tab_main)
-            stats_frame.pack(fill="x", padx=10, pady=10)
+        self.stop_btn = ctk.CTkButton(control_frame, text="⏹️ Остановить",
+                                      command=self.stop_bot, width=200, height=40,
+                                      fg_color="red", hover_color="darkred", state="disabled")
+        self.stop_btn.pack(side="left", padx=20, pady=10)
 
-            self.stats_label = ctk.CTkLabel(stats_frame,
-                                            text="📊 Сообщений: 0 | Лидов: 0",
-                                            font=("", 14))
-            self.stats_label.pack(pady=10)
+        # Stats
+        stats_frame = ctk.CTkFrame(self.tab_main)
+        stats_frame.pack(fill="x", padx=10, pady=10)
 
-            self.message_count = 0
-            self.lead_count = 0
+        self.stats_label = ctk.CTkLabel(stats_frame,
+                                        text="📊 Сообщений: 0 | Лидов: 0",
+                                        font=("", 14))
+        self.stats_label.pack(pady=10)
 
     def setup_main_tab_tk(self):
         """Tkinter version of main tab"""
-        # Auth frame
         auth_frame = ttk.LabelFrame(self.tab_main, text="Авторизация Telegram")
         auth_frame.pack(fill="x", padx=10, pady=10)
 
@@ -343,79 +445,70 @@ class NinjaApp:
         self.auth_btn = ttk.Button(auth_frame, text="Войти", command=self.start_auth)
         self.auth_btn.grid(row=0, column=2, padx=5, pady=5)
 
-        # Code frame
         code_frame = ttk.Frame(auth_frame)
         code_frame.grid(row=1, column=0, columnspan=3, pady=5)
 
         ttk.Label(code_frame, text="Код:").pack(side="left")
         self.code_entry = ttk.Entry(code_frame, width=10)
         self.code_entry.pack(side="left", padx=5)
-
         self.code_btn = ttk.Button(code_frame, text="OK", command=self.submit_code)
         self.code_btn.pack(side="left")
 
-        # Control frame
         control_frame = ttk.Frame(self.tab_main)
         control_frame.pack(fill="x", padx=10, pady=10)
 
-        self.start_btn = ttk.Button(control_frame, text="▶️ Запустить бота",
-                                    command=self.start_bot)
+        self.start_btn = ttk.Button(control_frame, text="▶️ Запустить бота", command=self.start_bot)
         self.start_btn.pack(side="left", padx=10, pady=10)
 
-        self.stop_btn = ttk.Button(control_frame, text="⏹️ Остановить",
-                                   command=self.stop_bot, state="disabled")
+        self.stop_btn = ttk.Button(control_frame, text="⏹️ Остановить", command=self.stop_bot, state="disabled")
         self.stop_btn.pack(side="left", padx=10, pady=10)
 
-        # Stats
         self.stats_label = ttk.Label(self.tab_main, text="📊 Сообщений: 0 | Лидов: 0")
         self.stats_label.pack(pady=10)
 
     def setup_settings_tab(self):
         """Settings configuration"""
-        if CTK_AVAILABLE:
-            # API Settings
-            api_frame = ctk.CTkFrame(self.tab_settings)
-            api_frame.pack(fill="x", padx=10, pady=10)
+        if not CTK_AVAILABLE:
+            self.setup_settings_tab_tk()
+            return
 
-            ctk.CTkLabel(api_frame, text="🤖 AI API Настройки",
-                        font=("", 16, "bold")).pack(pady=10)
+        api_frame = ctk.CTkFrame(self.tab_settings)
+        api_frame.pack(fill="x", padx=10, pady=10)
 
-            # API Key
-            key_frame = ctk.CTkFrame(api_frame, fg_color="transparent")
-            key_frame.pack(fill="x", padx=20, pady=5)
+        ctk.CTkLabel(api_frame, text="🤖 AI API Настройки",
+                    font=("", 16, "bold")).pack(pady=10)
 
-            ctk.CTkLabel(key_frame, text="API Key:").pack(side="left")
-            self.api_key_entry = ctk.CTkEntry(key_frame, width=400, show="*")
-            self.api_key_entry.pack(side="left", padx=10)
-            self.api_key_entry.insert(0, self.config.get("ai_api_key", ""))
+        key_frame = ctk.CTkFrame(api_frame, fg_color="transparent")
+        key_frame.pack(fill="x", padx=20, pady=5)
 
-            # Model
-            model_frame = ctk.CTkFrame(api_frame, fg_color="transparent")
-            model_frame.pack(fill="x", padx=20, pady=5)
+        ctk.CTkLabel(key_frame, text="API Key:").pack(side="left")
+        self.api_key_entry = ctk.CTkEntry(key_frame, width=400, show="*")
+        self.api_key_entry.pack(side="left", padx=10)
+        self.api_key_entry.insert(0, self.config.get("ai_api_key", ""))
 
-            ctk.CTkLabel(model_frame, text="Модель:").pack(side="left")
-            self.model_entry = ctk.CTkEntry(model_frame, width=200)
-            self.model_entry.pack(side="left", padx=10)
-            self.model_entry.insert(0, self.config.get("ai_model", "glm-4"))
+        model_frame = ctk.CTkFrame(api_frame, fg_color="transparent")
+        model_frame.pack(fill="x", padx=20, pady=5)
 
-            # System Prompt
-            prompt_frame = ctk.CTkFrame(self.tab_settings)
-            prompt_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        ctk.CTkLabel(model_frame, text="Модель:").pack(side="left")
+        self.model_entry = ctk.CTkEntry(model_frame, width=200)
+        self.model_entry.pack(side="left", padx=10)
+        self.model_entry.insert(0, self.config.get("ai_model", "glm-4"))
 
-            ctk.CTkLabel(prompt_frame, text="📝 Системный промпт",
-                        font=("", 14, "bold")).pack(pady=5)
+        prompt_frame = ctk.CTkFrame(self.tab_settings)
+        prompt_frame.pack(fill="both", expand=True, padx=10, pady=10)
 
-            self.prompt_text = ctk.CTkTextbox(prompt_frame, height=300)
-            self.prompt_text.pack(fill="both", expand=True, padx=10, pady=5)
-            self.prompt_text.insert("1.0", self.config.get("system_prompt", DEFAULT_SYSTEM_PROMPT))
+        ctk.CTkLabel(prompt_frame, text="📝 Системный промпт",
+                    font=("", 14, "bold")).pack(pady=5)
 
-            # Save button
-            ctk.CTkButton(self.tab_settings, text="💾 Сохранить настройки",
-                         command=self.save_settings, width=200).pack(pady=10)
+        self.prompt_text = ctk.CTkTextbox(prompt_frame, height=300)
+        self.prompt_text.pack(fill="both", expand=True, padx=10, pady=5)
+        self.prompt_text.insert("1.0", self.config.get("system_prompt", DEFAULT_SYSTEM_PROMPT))
+
+        ctk.CTkButton(self.tab_settings, text="💾 Сохранить настройки",
+                     command=self.save_settings, width=200).pack(pady=10)
 
     def setup_settings_tab_tk(self):
         """Tkinter version of settings"""
-        # API Frame
         api_frame = ttk.LabelFrame(self.tab_settings, text="AI API Настройки")
         api_frame.pack(fill="x", padx=10, pady=10)
 
@@ -429,7 +522,6 @@ class NinjaApp:
         self.model_entry.grid(row=1, column=1, padx=5, pady=5, sticky="w")
         self.model_entry.insert(0, self.config.get("ai_model", "glm-4"))
 
-        # Prompt
         prompt_frame = ttk.LabelFrame(self.tab_settings, text="Системный промпт")
         prompt_frame.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -437,8 +529,7 @@ class NinjaApp:
         self.prompt_text.pack(fill="both", expand=True, padx=5, pady=5)
         self.prompt_text.insert("1.0", self.config.get("system_prompt", DEFAULT_SYSTEM_PROMPT))
 
-        ttk.Button(self.tab_settings, text="💾 Сохранить",
-                  command=self.save_settings).pack(pady=10)
+        ttk.Button(self.tab_settings, text="💾 Сохранить", command=self.save_settings).pack(pady=10)
 
     def setup_logs_tab(self):
         """Message logs display"""
@@ -452,8 +543,7 @@ class NinjaApp:
             self.log_text = scrolledtext.ScrolledText(self.tab_logs)
             self.log_text.pack(fill="both", expand=True, padx=5, pady=5)
 
-            ttk.Button(self.tab_logs, text="Очистить",
-                      command=self.clear_logs).pack(pady=5)
+            ttk.Button(self.tab_logs, text="Очистить", command=self.clear_logs).pack(pady=5)
 
     def clear_logs(self):
         if CTK_AVAILABLE:
@@ -495,35 +585,12 @@ class NinjaApp:
         self.config["phone"] = phone
         self.save_config()
 
-        self.log_message(f"📱 Начинаем авторизацию: {phone}")
+        self.log_message(f"📱 Отправляем код на {phone}...")
 
-        # Start auth in background
-        threading.Thread(target=self._do_auth, daemon=True).start()
+        def callback(status, data):
+            self.message_queue.put(("auth", f"{status}:{data}"))
 
-    def _do_auth(self):
-        """Do actual auth in background"""
-        async def auth():
-            try:
-                self.client = TelegramClient(
-                    str(SESSION_PATH),
-                    int(self.config.get("api_id", "0")),
-                    self.config.get("api_hash", "")
-                )
-                await self.client.connect()
-
-                if await self.client.is_user_authorized():
-                    self.message_queue.put(("auth_success", "Already authorized"))
-                    return
-
-                # Send code
-                result = await self.client.send_code_request(self.config["phone"])
-                self.phone_code_hash = result.phone_code_hash
-                self.message_queue.put(("code_needed", ""))
-
-            except Exception as e:
-                self.message_queue.put(("auth_error", str(e)))
-
-        asyncio.run(auth())
+        self.bot.connect(phone, callback)
 
     def submit_code(self):
         """Submit verification code"""
@@ -531,33 +598,24 @@ class NinjaApp:
         if not code:
             return
 
-        threading.Thread(target=self._do_sign_in, args=(code,), daemon=True).start()
+        phone = self.config.get("phone", "")
 
-    def _do_sign_in(self, code: str):
-        """Sign in with code"""
-        async def sign_in():
-            try:
-                await self.client.sign_in(
-                    self.config["phone"],
-                    code,
-                    phone_code_hash=self.phone_code_hash
-                )
-                self.message_queue.put(("auth_success", ""))
-            except Exception as e:
-                self.message_queue.put(("auth_error", str(e)))
+        def callback(status, data):
+            self.message_queue.put(("auth", f"{status}:{data}"))
 
-        asyncio.run(sign_in())
+        self.bot.sign_in(phone, code, callback)
 
     def start_bot(self):
         """Start the bot"""
-        if not self.client or not self.client.is_connected():
-            messagebox.showerror("Ошибка", "Сначала авторизуйтесь в Telegram")
-            return
-
         if not self.config.get("ai_api_key"):
             messagebox.showwarning("Внимание", "Укажите AI API Key в настройках")
 
-        self.bot_running = True
+        self.log_message("🤖 Запуск бота...")
+
+        def callback(status, data):
+            self.message_queue.put(("bot", f"{status}:{data}"))
+
+        self.bot.start_bot(callback)
 
         if CTK_AVAILABLE:
             self.start_btn.configure(state="disabled")
@@ -568,13 +626,9 @@ class NinjaApp:
 
         self.status_var.set("✅ Бот работает")
 
-        # Start bot loop
-        threading.Thread(target=self._bot_loop, daemon=True).start()
-        self.log_message("🤖 Бот запущен!")
-
     def stop_bot(self):
         """Stop the bot"""
-        self.bot_running = False
+        self.bot.stop_bot()
 
         if CTK_AVAILABLE:
             self.start_btn.configure(state="normal")
@@ -586,108 +640,61 @@ class NinjaApp:
         self.status_var.set("⏹️ Бот остановлен")
         self.log_message("⏹️ Бот остановлен")
 
-    def _bot_loop(self):
-        """Main bot loop"""
-        async def run_bot():
-            @self.client.on(events.NewMessage(incoming=True))
-            async def handler(event):
-                if not self.bot_running:
-                    return
-
-                try:
-                    sender = await event.get_sender()
-                    if isinstance(sender, User) and not sender.bot:
-                        await self.process_message(event, sender)
-                except Exception as e:
-                    self.log_message(f"Ошибка: {e}")
-
-            await self.client.run_until_disconnected()
-
-        asyncio.run(run_bot())
-
-    async def process_message(self, event, sender: User):
-        """Process incoming message"""
-        chat_id = event.chat_id
-        text = event.text or ""
-        sender_name = sender.first_name or "Unknown"
-
-        self.message_count += 1
-        self.message_queue.put(("stats", f"{self.message_count}:{self.lead_count}"))
-
-        self.log_message(text[:100], sender_name)
-
-        # Skip if no API key
-        if not self.config.get("ai_api_key"):
-            return
-
-        # Build conversation
-        if chat_id not in self.conversation_history:
-            self.conversation_history[chat_id] = []
-
-        # Add user message
-        self.conversation_history[chat_id].append({
-            "role": "user",
-            "content": text
-        })
-
-        # Build messages for AI
-        messages = [
-            {"role": "system", "content": self.config.get("system_prompt", DEFAULT_SYSTEM_PROMPT)}
-        ]
-        messages.extend(self.conversation_history[chat_id][-10:])
-
-        try:
-            # Get AI response
-            response = await call_ai_direct(
-                messages,
-                self.config["ai_api_key"],
-                self.config.get("ai_model", "glm-4")
-            )
-
-            # Send response
-            await event.reply(response)
-
-            # Add to history
-            self.conversation_history[chat_id].append({
-                "role": "assistant",
-                "content": response
-            })
-
-            self.log_message(response[:100], "AI")
-
-        except Exception as e:
-            self.log_message(f"AI Error: {e}")
-
     def process_messages(self):
         """Process messages from background threads"""
         try:
             while True:
                 msg_type, data = self.message_queue.get_nowait()
 
-                if msg_type == "auth_success":
-                    self.log_message("✅ Авторизация успешна!")
-                    self.status_var.set("✅ Авторизован")
+                if msg_type == "auth":
+                    status, info = data.split(":", 1) if ":" in data else (data, "")
+                    if status == "authorized":
+                        self.log_message("✅ Уже авторизован!")
+                        self.status_var.set("✅ Авторизован")
+                    elif status == "code_sent":
+                        self.log_message("📱 Код отправлен! Введите код из Telegram")
+                        if CTK_AVAILABLE:
+                            self.code_frame.pack(pady=5)
+                        messagebox.showinfo("Код", "Введите код из Telegram")
+                    elif status == "signed_in":
+                        self.log_message("✅ Авторизация успешна!")
+                        self.status_var.set("✅ Авторизован")
+                    elif status == "error":
+                        self.log_message(f"❌ Ошибка: {info}")
+                        messagebox.showerror("Ошибка", info)
 
-                elif msg_type == "code_needed":
-                    self.log_message("📱 Введите код из Telegram")
-                    if CTK_AVAILABLE:
-                        self.code_frame.pack(pady=5)
-                    messagebox.showinfo("Код", "Введите код из Telegram")
+                elif msg_type == "bot":
+                    status, info = data.split(":", 1) if ":" in data else (data, "")
+                    if status == "started":
+                        self.log_message("🤖 Бот запущен и слушает сообщения!")
+                    elif status == "error":
+                        self.log_message(f"❌ Ошибка: {info}")
 
-                elif msg_type == "auth_error":
-                    self.log_message(f"❌ Ошибка: {data}")
-                    messagebox.showerror("Ошибка авторизации", data)
+                elif msg_type == "message":
+                    self.message_count += 1
+                    self.update_stats()
+                    self.log_message(info, "📥")
 
-                elif msg_type == "stats":
-                    msg_count, lead_count = data.split(":")
-                    self.stats_label.configure(
-                        text=f"📊 Сообщений: {msg_count} | Лидов: {lead_count}"
-                    )
+                elif msg_type == "response":
+                    self.log_message(info, "📤")
+
+                elif msg_type == "error":
+                    self.log_message(data, "❌")
+
         except queue.Empty:
             pass
 
-        # Schedule next check
         self.root.after(100, self.process_messages)
+
+    def update_stats(self):
+        if CTK_AVAILABLE:
+            self.stats_label.configure(
+                text=f"📊 Сообщений: {self.message_count} | Лидов: {self.lead_count}"
+            )
+        else:
+            self.stats_label.configure(
+                text=f"📊 Сообщений: {self.message_count} | Лидов: {self.lead_count}"
+            )
 
     def run(self):
         """Run the application"""
@@ -698,16 +705,6 @@ class NinjaApp:
 # Entry Point
 # ---------------------------------------------------------------------------
 def main():
-    # Hide console on Windows
-    if sys.platform == 'win32':
-        try:
-            import ctypes
-            console = ctypes.windll.kernel32.GetConsoleWindow()
-            if console:
-                ctypes.windll.user32.ShowWindow(console, 0)
-        except:
-            pass
-
     app = NinjaApp()
     app.run()
 
